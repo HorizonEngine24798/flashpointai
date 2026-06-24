@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crisis-room-sim"
+version = "0.0.0"
+description = "LLM-assisted political-military crisis room simulation"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2.8.0",
+  "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2.0",
+]
+
+[project.scripts]
+crisis-room = "crisis_room.app.tui:main"
+crisis-room-llm-preflight = "crisis_room.llm.preflight:main"
+crisis-room-llm-smoke = "crisis_room.llm.smoke:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+markers = [
+  "live_llm: opt-in tests that start or call a live local llama.cpp server",
+  "slow: tests that may take long enough to be inappropriate for the default fast loop",
+]

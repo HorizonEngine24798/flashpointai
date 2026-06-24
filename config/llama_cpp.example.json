@@ -1,0 +1,37 @@
+{
+  "llama_cpp": {
+    "backend": "llama_cpp_server",
+    "preset": "qwen3.5-35b-uncensored",
+    "base_url": "http://127.0.0.1:8080/v1",
+    "server_model": "Qwen3.5-35B-A3B-Q3_K_M",
+    "max_input_tokens": 40960,
+    "max_new_tokens": 8192,
+    "token_estimation_chars_per_token": 3.0,
+    "json_retries": 1,
+    "enable_thinking": false,
+    "manage_server": true,
+    "server_executable": "D:/path/to/llama-server.exe",
+    "server_model_path": "D:/path/to/Qwen3.5-35B-A3B-Uncensored-HauhauCS-Aggressive-Q3_K_M.gguf",
+    "server_arguments": [
+      "--no-webui",
+      "--reasoning",
+      "off",
+      "-ngl",
+      "all",
+      "-c",
+      "65536",
+      "-np",
+      "1"
+    ],
+    "server_log_dir": "output/diagnostics/llama_server",
+    "server_startup_timeout_seconds": 180,
+    "server_shutdown_timeout_seconds": 15,
+    "server_auto_stop": true,
+    "request_timeout_seconds": 300,
+    "readiness_connect_timeout_seconds": 0.5,
+    "readiness_read_timeout_seconds": 1.2,
+    "readiness_poll_interval_seconds": 0.4,
+    "temperature": 0.2,
+    "top_p": 0.9
+  }
+}

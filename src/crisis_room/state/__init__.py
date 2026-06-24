@@ -1,0 +1,2 @@
+"""State model skeleton."""
+

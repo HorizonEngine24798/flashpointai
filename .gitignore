@@ -1,0 +1,21 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Build/package metadata
+*.egg-info/
+dist/
+build/
+
+# Local envs/config
+.env
+.venv/
+venv/
+config/*.local.json
+
+# Runtime data and diagnostics
+output/
+saves/
+*.db

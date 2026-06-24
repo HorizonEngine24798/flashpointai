@@ -1,0 +1,165 @@
+CRISIS ROOM SIMULATION
+
+Working product description
+
+A text-first political-military crisis simulation where the player inhabits one faction inside a historical or historically grounded crisis. The game is driven by multiple LLM-controlled entities, but adjudicated by a deterministic game engine so that resources, timing, capabilities, escalation pressure, uncertainty, and consequences remain coherent.
+
+The experience should feel like sitting inside a crisis room during an unfolding strategic emergency: advice is contested, facts are incomplete, messages are corrupted by channel and perception, other actors have their own internal politics, and almost every event creates pressure toward escalation.
+
+Golden source of truth
+
+The intended product is not the old MVP described in README.md or prior design notes. The intended end product is:
+
+1. A milpol crisis room simulator.
+2. A player faction participating in a historical crisis.
+3. Multiple LLM-driven entities with distinct responsibilities.
+4. Faction entities that internally simulate competing narratives or sub-factions.
+5. A deterministic rules engine that decides what actions are possible and what their concrete effects are.
+6. A gamemaster that receives clear intent, converts it into legal game actions, resolves outcomes, and maintains timelines.
+7. An info channel that corrupts and filters signals before entities receive them, creating uncertainty and fog of war.
+8. An event creator that injects both historically grounded events and chaotic escalation pressure.
+9. A dialogue engine that lets the player converse with multiple advisor personalities between formal actions.
+10. A public timeline and an omniscient timeline, with each entity receiving only what it could plausibly know.
+
+Core entities
+
+1. Player faction
+   The faction controlled by the player. It has resources, institutions, internal factions, public posture, private goals, and uncertain beliefs.
+
+2. Dialogue engine
+   A player-facing conversational layer. It internally simulates multiple advisor personalities so the player can ask questions, test ideas, receive warnings, and understand tradeoffs between formal actions.
+
+3. Allied faction or factions
+   LLM-controlled factions aligned with, dependent on, or pressuring the player. Each allied faction has two competing internal narratives or sub-factions.
+
+4. Opposing faction or factions
+   LLM-controlled rival actors. Each opposing faction also has two competing internal narratives or sub-factions.
+
+5. International community
+   A single LLM-controlled entity representing global institutions, non-aligned states, media pressure, markets, diplomatic blocs, humanitarian organizations, and external legitimacy. It also has two competing internal narratives.
+
+6. Gamemaster
+   The deterministic white-cell authority. It receives clear signals from entities, interprets them into legal actions, resolves outcomes through the rules engine, updates state, writes timelines, and emits events.
+
+7. Event creator
+   A scenario pressure system with two duties:
+   - Inject historically grounded scripted events that softly pull the scenario toward what happened.
+   - Inject chaotic events that model how crises escalate through accidents, misreads, leaks, local initiative, panic, and institutional friction.
+
+8. Info channel
+   The fog-of-war layer. It receives signals from entities and the gamemaster, then filters, delays, distorts, leaks, amplifies, or suppresses them according to scenario and channel rules before delivery.
+
+Turn model
+
+A turn is a decision cycle, not a chat message.
+
+1. Entities receive their inbox:
+   - gamemaster events
+   - public timeline updates
+   - media or international news
+   - private/intel packets
+   - distorted signals from the info channel
+
+2. Entities think:
+   - update beliefs
+   - deliberate internally
+   - weigh competing narratives
+   - form intent
+
+3. Player interacts with the dialogue engine:
+   - asks advisors questions
+   - explores interpretations
+   - drafts possible actions
+
+4. Entities submit decisions:
+   - player submits formal action package
+   - AI factions submit clear intent
+   - international community submits pressure/response signals
+   - event creator submits scheduled or chaotic inject candidates
+
+5. Gamemaster resolves:
+   - validates actions
+   - applies resources and time costs
+   - adjudicates outcomes
+   - updates deterministic state
+   - writes omniscient timeline
+   - writes public timeline
+
+6. Info channel distributes:
+   - public news
+   - private diplomatic messages
+   - backchannel signals
+   - intel reports
+   - rumors
+   - distorted interpretations
+
+7. End of turn:
+   - all entities write decision summaries
+   - timelines are updated
+   - next turn begins from imperfect information
+
+Design principles
+
+1. Deterministic rules own state.
+   LLMs can propose, interpret, advise, and narrate. They do not directly mutate the game state.
+
+2. Information asymmetry is central.
+   No entity except the gamemaster sees the full truth. The player should often act under uncertainty.
+
+3. Internal disagreement matters.
+   Factions are not single flat minds. They contain competing narratives that pull decisions in different directions.
+
+4. Escalation should be structurally easy.
+   Stabilization should require sustained skill, credible signals, resources, luck, and timing.
+
+5. Channels matter.
+   A public threat, private warning, backchannel offer, leaked memo, and covert intel packet should have different effects even if the underlying intent is similar.
+
+6. History guides but does not imprison.
+   Scripted events should create gravity toward historical pressures, not force a replay.
+
+7. The player should feel agency, not omniscience.
+   The game should support creative action while making consequences flow through bounded rules.
+
+8. llama.cpp is the inference backend.
+   The system runs local inference through llama.cpp server mode using OpenAI-compatible chat completions. Old Ollama-style inference is not part of the target architecture.
+
+What to keep from the old repo
+
+Some existing code may be salvageable as implementation reference:
+
+1. Deterministic turn adjudication concepts.
+2. Stage/action/inject data concepts.
+3. Hidden clocks and outcome thresholds.
+4. Actor belief state concepts.
+5. Delayed/contradictory intel packet concepts.
+6. Regression and balance testing ideas.
+
+What to replace
+
+1. Old Ollama backend.
+2. Old docs as product truth.
+3. Flat actor planner as the complete AI architecture.
+4. Any UI that exposes hidden information as normal play state.
+5. Any design that treats a faction as a single uncomplicated decision-maker.
+
+Near-term TUI idea
+
+The first playable interface should be a basic debug TUI, not a web UI.
+
+It should:
+
+1. Show intro text about the game.
+2. Show intro text about the scenario.
+3. Present advisor messages as Action 0 before formal action.
+4. Let the player type freeform messages to the dialogue engine.
+5. Use the `ACTION` keyword to submit a formal action package.
+6. Support several turns of play.
+7. After each action turn, print all dialogue, internals, pipelines, thoughts, timelines, and raw/debug outputs generated by each LLM-controlled entity and deterministic subsystem.
+8. Save all generated and written text as a JSON debug transcript at the end of the session.
+
+This debug TUI is intentionally omniscient for development. The future player-facing UI should hide other entities' private reasoning, hidden timelines, raw LLM output, and true state unless debug mode is enabled.
+
+Target feeling
+
+The player should feel that the crisis is alive around them: allies pressure them, rivals misread them, advisors disagree, events keep moving, public narratives mutate, private channels leak, and the deterministic engine keeps the world grounded even when the LLMs make the human layer rich and unpredictable.
