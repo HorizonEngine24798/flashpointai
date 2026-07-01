@@ -9,14 +9,14 @@ from pydantic import BaseModel, Field
 from crisis_room.app.planning import PlayerPlanPreview
 from crisis_room.app.turn_orchestrator import TurnDebugTranscript
 from crisis_room.llm.contracts import LLMCallRecord
-from crisis_room.llm.task_contracts import AdvisorResponse
+from crisis_room.llm.task_contracts import AdvisorCouncilResponse
 from crisis_room.state.world import WorldStateV2
 
 
 class DialogueDebugRecord(BaseModel):
     turn: int
     player_message: str
-    response: AdvisorResponse
+    response: AdvisorCouncilResponse
     llm_calls: list[LLMCallRecord] = Field(default_factory=list)
 
 
@@ -24,6 +24,13 @@ class PlanPreviewDebugRecord(BaseModel):
     turn: int
     player_intent: str
     preview: PlayerPlanPreview
+    rendered_text: str = ""
+    llm_calls: list[LLMCallRecord] = Field(default_factory=list)
+
+
+class LLMTaskDebugRecord(BaseModel):
+    turn: int
+    label: str
     rendered_text: str = ""
     llm_calls: list[LLMCallRecord] = Field(default_factory=list)
 
@@ -37,6 +44,7 @@ class DebugSessionRecord(BaseModel):
     world_state: WorldStateV2
     dialogue_records: list[DialogueDebugRecord] = Field(default_factory=list)
     plan_previews: list[PlanPreviewDebugRecord] = Field(default_factory=list)
+    llm_task_records: list[LLMTaskDebugRecord] = Field(default_factory=list)
     turn_transcripts: list[TurnDebugTranscript] = Field(default_factory=list)
     rendered_log: list[str] = Field(default_factory=list)
 
@@ -71,7 +79,7 @@ class DebugSessionRecorder:
         *,
         turn: int,
         player_message: str,
-        response: AdvisorResponse,
+        response: AdvisorCouncilResponse,
         llm_calls: list[LLMCallRecord],
     ) -> None:
         self.record.dialogue_records.append(
@@ -99,6 +107,26 @@ class DebugSessionRecorder:
                 turn=turn,
                 player_intent=player_intent,
                 preview=preview.model_copy(deep=True),
+                rendered_text=rendered_text,
+                llm_calls=[call.model_copy(deep=True) for call in llm_calls],
+            )
+        )
+        if rendered_text:
+            self.record.rendered_log.append(rendered_text)
+        self._touch()
+
+    def append_llm_task(
+        self,
+        *,
+        turn: int,
+        label: str,
+        llm_calls: list[LLMCallRecord],
+        rendered_text: str = "",
+    ) -> None:
+        self.record.llm_task_records.append(
+            LLMTaskDebugRecord(
+                turn=turn,
+                label=label,
                 rendered_text=rendered_text,
                 llm_calls=[call.model_copy(deep=True) for call in llm_calls],
             )

@@ -6,7 +6,14 @@ import re
 
 from pydantic import BaseModel, Field
 
-from crisis_room.engine.actions import ActionDefinition, ActionPackage, ActionValidationResult
+from crisis_room.engine.action_matching import actor_type_allowed, target_allowed
+from crisis_room.engine.actions import (
+    ActionDefinition,
+    ActionPackage,
+    ActionResolver,
+    ActionValidationResult,
+    ScenarioCapability,
+)
 from crisis_room.engine.clocks import NumericChange, apply_numeric_effects, clamp
 from crisis_room.engine.resources import (
     ResourceLedgerEntry,
@@ -42,6 +49,7 @@ class CausalTraceEntry(BaseModel):
     action_package_id: str | None = None
     actor_id: str | None = None
     action_id: str | None = None
+    capability_id: str | None = None
     summary: str
     details: dict[str, str | int | float | bool] = Field(default_factory=dict)
 
@@ -49,8 +57,13 @@ class CausalTraceEntry(BaseModel):
 class DeterministicEngineV2:
     """Catalog-driven deterministic engine for Phase 3."""
 
-    def __init__(self, action_catalog: list[ActionDefinition]) -> None:
-        self.action_catalog = {definition.action_id: definition for definition in action_catalog}
+    def __init__(
+        self,
+        action_catalog: list[ActionDefinition],
+        capabilities: list[ScenarioCapability] | None = None,
+    ) -> None:
+        self.resolver = ActionResolver(action_catalog, capabilities)
+        self.action_catalog = self.resolver.action_catalog
 
     def validate_action(
         self,
@@ -58,27 +71,34 @@ class DeterministicEngineV2:
         action_package: ActionPackage,
         *,
         skip_resource_costs: bool = False,
-        skip_cooldown: bool = False,
     ) -> ActionValidationResult:
         errors: list[str] = []
         warnings: list[str] = []
-        definition = self.action_catalog.get(action_package.action_id)
+        definition, resolver_errors = self.resolver.resolve_package(action_package)
+        errors.extend(resolver_errors)
 
         if definition is None:
-            errors.append(f"unknown action: {action_package.action_id}")
             return ActionValidationResult(
                 is_valid=False,
                 errors=errors,
                 warnings=warnings,
                 action_definition_id=action_package.action_id,
+                capability_id=action_package.capability_id,
             )
 
         actor = world_state.actors.get(action_package.actor_id)
         if actor is None:
             errors.append(f"unknown actor: {action_package.actor_id}")
-        elif not _actor_type_allowed(actor.entity_type.value, definition.actor_types_allowed):
+        elif (
+            definition.actor_ids_allowed
+            and action_package.actor_id not in definition.actor_ids_allowed
+        ):
             errors.append(
-                f"actor type {actor.entity_type.value} cannot perform {definition.action_id}"
+                f"actor {action_package.actor_id} cannot perform {_definition_id(definition)}"
+            )
+        elif not actor_type_allowed(actor.entity_type.value, definition.actor_types_allowed):
+            errors.append(
+                f"actor type {actor.entity_type.value} cannot perform {_definition_id(definition)}"
             )
 
         if not action_package.intent_summary.strip():
@@ -91,11 +111,11 @@ class DeterministicEngineV2:
         target_count = len(action_package.target_ids)
         if target_count < definition.min_targets:
             errors.append(
-                f"{definition.action_id} requires at least {definition.min_targets} target(s)"
+                f"{_definition_id(definition)} requires at least {definition.min_targets} target(s)"
             )
         if definition.max_targets is not None and target_count > definition.max_targets:
             errors.append(
-                f"{definition.action_id} allows at most {definition.max_targets} target(s)"
+                f"{_definition_id(definition)} allows at most {definition.max_targets} target(s)"
             )
 
         for target_id in action_package.target_ids:
@@ -103,10 +123,15 @@ class DeterministicEngineV2:
             if target is None:
                 errors.append(f"unknown target: {target_id}")
                 continue
-            if not _target_allowed(target_id, target.entity_type.value, definition.targets_allowed):
+            if not target_allowed(
+                target_id,
+                target.entity_type.value,
+                definition.targets_allowed,
+                definition.target_ids_allowed,
+            ):
                 errors.append(
                     f"target {target_id} of type {target.entity_type.value} "
-                    f"not allowed for {definition.action_id}"
+                    f"not allowed for {_definition_id(definition)}"
                 )
 
         if actor is not None and not skip_resource_costs:
@@ -119,30 +144,20 @@ class DeterministicEngineV2:
                 )
                 errors.append(f"insufficient resources: {missing}")
 
-        cooldown_key = _cooldown_key(action_package.actor_id, definition.action_id)
-        cooldown_until = world_state.metadata.get(cooldown_key)
-        if (
-            not skip_cooldown
-            and isinstance(cooldown_until, int)
-            and world_state.turn_number < cooldown_until
-        ):
-            errors.append(
-                f"{definition.action_id} is on cooldown until turn {cooldown_until}"
-            )
-
         for precondition in definition.preconditions:
             ok, message = _evaluate_precondition(world_state, action_package, precondition)
             if not ok:
                 errors.append(message)
 
         if not action_package.target_ids and definition.targets_allowed and definition.min_targets == 0:
-            warnings.append(f"{definition.action_id} has target rules but no targets")
+            warnings.append(f"{_definition_id(definition)} has target rules but no targets")
 
         return ActionValidationResult(
             is_valid=not errors,
             errors=errors,
             warnings=warnings,
             action_definition_id=definition.action_id,
+            capability_id=definition.capability_id,
         )
 
     def resolve_actions(
@@ -176,9 +191,15 @@ class DeterministicEngineV2:
         world_state.pending_actions = remaining
 
         for pending_action in due:
-            definition = self.action_catalog.get(pending_action.action_id)
+            definition, resolver_errors = self.resolver.resolve_package(pending_action)
             if definition is None:
                 result.rejected_actions.append(pending_action)
+                result.validation_results[pending_action.package_id] = ActionValidationResult(
+                    is_valid=False,
+                    errors=resolver_errors,
+                    action_definition_id=pending_action.action_id,
+                    capability_id=pending_action.capability_id,
+                )
                 self._trace(
                     result,
                     world_state,
@@ -191,7 +212,6 @@ class DeterministicEngineV2:
                 world_state,
                 pending_action,
                 skip_resource_costs=True,
-                skip_cooldown=True,
             )
             result.validation_results[pending_action.package_id] = validation
             if not validation.is_valid:
@@ -230,10 +250,23 @@ class DeterministicEngineV2:
             )
             return
 
-        definition = self.action_catalog[action_package.action_id]
+        definition, resolver_errors = self.resolver.resolve_package(action_package)
+        if definition is None:
+            result.rejected_actions.append(action_package)
+            result.trace.extend(resolver_errors)
+            self._write_rejection_timeline(
+                world_state,
+                action_package,
+                ActionValidationResult(
+                    is_valid=False,
+                    errors=resolver_errors,
+                    action_definition_id=action_package.action_id,
+                    capability_id=action_package.capability_id,
+                ),
+            )
+            return
         delay = definition.preparation_turns + max(0, definition.execution_turns - 1)
         self._apply_submission_costs(world_state, result, action_package, definition)
-        self._set_cooldown(world_state, action_package, definition)
 
         if delay > 0:
             scheduled = action_package.model_copy(deep=True)
@@ -244,6 +277,7 @@ class DeterministicEngineV2:
                     "ready_turn": world_state.turn_number + delay,
                     "resource_costs_paid": True,
                     "action_definition_id": definition.action_id,
+                    "capability_id": definition.capability_id or "",
                 }
             )
             world_state.pending_actions.append(scheduled)
@@ -288,7 +322,7 @@ class DeterministicEngineV2:
                 actor.entity_id,
                 actor.resources,
                 definition.actor_resource_effects,
-                reason=f"{definition.action_id}:actor_effect",
+                reason=f"{_definition_id(definition)}:actor_effect",
             )
         )
         for target_id in action_package.target_ids:
@@ -298,7 +332,7 @@ class DeterministicEngineV2:
                     target.entity_id,
                     target.resources,
                     definition.target_resource_effects,
-                    reason=f"{definition.action_id}:target_effect",
+                    reason=f"{_definition_id(definition)}:target_effect",
                 )
             )
 
@@ -342,12 +376,13 @@ class DeterministicEngineV2:
             result,
             world_state,
             "adjudication",
-            f"executed {definition.action_id}",
+            f"executed {_definition_id(definition)}",
             action_package,
             emitted_signal_id=signal.signal_id,
         )
         result.trace.append(
-            f"executed {action_package.package_id} via {definition.action_id}; "
+            f"executed {action_package.package_id} via {action_package.action_id}; "
+            f"capability {definition.capability_id or '(none)'}; "
             f"emitted {signal.signal_id}"
         )
 
@@ -364,7 +399,7 @@ class DeterministicEngineV2:
             actor.entity_id,
             actor.resources,
             costs,
-            reason=f"{definition.action_id}:resource_cost",
+            reason=f"{_definition_id(definition)}:resource_cost",
         )
         for entry in entries:
             result.trace.append(
@@ -382,18 +417,6 @@ class DeterministicEngineV2:
                 after=entry.after,
                 delta=entry.delta,
             )
-
-    def _set_cooldown(
-        self,
-        world_state: WorldStateV2,
-        action_package: ActionPackage,
-        definition: ActionDefinition,
-    ) -> None:
-        if definition.cooldown_turns <= 0:
-            return
-        world_state.metadata[_cooldown_key(action_package.actor_id, definition.action_id)] = (
-            world_state.turn_number + definition.cooldown_turns
-        )
 
     def _apply_relationship_effects(
         self,
@@ -462,6 +485,8 @@ class DeterministicEngineV2:
                 metadata={
                     "package_id": action_package.package_id,
                     "ready_turn": ready_turn,
+                    "action_id": action_package.action_id,
+                    "capability_id": definition.capability_id or "",
                 },
             )
         )
@@ -495,6 +520,8 @@ class DeterministicEngineV2:
                 created_at=_deterministic_time(world_state.turn_number),
                 metadata={
                     "package_id": action_package.package_id,
+                    "action_id": action_package.action_id,
+                    "capability_id": definition.capability_id or "",
                     "resource_changes": len(resource_entries),
                     "truth_changes": len(truth_changes),
                     "public_changes": len(public_changes),
@@ -515,7 +542,11 @@ class DeterministicEngineV2:
                     signal_ids=[signal.signal_id],
                     tags=["action", "public", definition.category.value],
                     created_at=_deterministic_time(world_state.turn_number),
-                    metadata={"package_id": action_package.package_id},
+                    metadata={
+                        "package_id": action_package.package_id,
+                        "action_id": action_package.action_id,
+                        "capability_id": definition.capability_id or "",
+                    },
                 )
             )
 
@@ -532,10 +563,22 @@ class DeterministicEngineV2:
             content = action_package.public_rationale
         elif action_package.private_rationale:
             content = action_package.intent_summary
+        metadata: dict[str, str | int | float | bool] = {
+            "action_id": action_package.action_id,
+            "capability_id": definition.capability_id or "",
+        }
+        for key in [
+            "backchannel_thread_id",
+            "direct_backchannel_message",
+            "formal_backchannel_message",
+            "leak_summary",
+        ]:
+            if key in action_package.metadata:
+                metadata[key] = action_package.metadata[key]
         return Signal(
             signal_id=(
                 f"sig_{world_state.turn_number}_{action_package.package_id}_"
-                f"{definition.action_id}"
+                f"{_definition_id(definition)}"
             ),
             source_entity_id=action_package.actor_id,
             recipient_entity_ids=[] if visibility == SignalVisibility.PUBLIC else action_package.target_ids,
@@ -551,7 +594,7 @@ class DeterministicEngineV2:
             distortion_risk=definition.signal_distortion_risk,
             urgency=action_package.commitment_level,
             classification="public" if visibility == SignalVisibility.PUBLIC else "confidential",
-            metadata={"action_id": definition.action_id},
+            metadata=metadata,
         )
 
     def _trace(
@@ -570,6 +613,7 @@ class DeterministicEngineV2:
                 action_package_id=action_package.package_id if action_package else None,
                 actor_id=action_package.actor_id if action_package else None,
                 action_id=action_package.action_id if action_package else None,
+                capability_id=action_package.capability_id if action_package else None,
                 summary=summary,
                 details=details,
             )
@@ -578,6 +622,10 @@ class DeterministicEngineV2:
 
 _PRECONDITION_RE = re.compile(
     r"^(?P<scope>truth|public|clock):(?P<key>[A-Za-z0-9_.-]+)"
+    r"(?P<op>>=|<=|==|>|<)(?P<value>-?\d+(?:\.\d+)?)$"
+)
+_BACKCHANNEL_MESSAGE_BUDGET_RE = re.compile(
+    r"^backchannel:player_messages_remaining"
     r"(?P<op>>=|<=|==|>|<)(?P<value>-?\d+(?:\.\d+)?)$"
 )
 _OPERATORS = {
@@ -589,12 +637,8 @@ _OPERATORS = {
 }
 
 
-def _actor_type_allowed(actor_type: str, allowed: list[str]) -> bool:
-    return not allowed or "*" in allowed or "any" in allowed or actor_type in allowed
-
-
-def _target_allowed(target_id: str, target_type: str, allowed: list[str]) -> bool:
-    return not allowed or "*" in allowed or "any" in allowed or target_id in allowed or target_type in allowed
+def _definition_id(definition: ActionDefinition) -> str:
+    return definition.capability_id or definition.action_id
 
 
 def _evaluate_precondition(
@@ -602,7 +646,36 @@ def _evaluate_precondition(
     action_package: ActionPackage,
     precondition: str,
 ) -> tuple[bool, str]:
-    match = _PRECONDITION_RE.match(precondition.replace(" ", ""))
+    normalized = precondition.replace(" ", "")
+    if normalized == "backchannel:open":
+        if _open_backchannel_threads(world_state, action_package):
+            return True, ""
+        return (
+            False,
+            f"precondition failed for {action_package.mechanical_id}: "
+            "no open backchannel thread with target",
+        )
+    backchannel_budget_match = _BACKCHANNEL_MESSAGE_BUDGET_RE.match(normalized)
+    if backchannel_budget_match:
+        op = backchannel_budget_match.group("op")
+        threshold = float(backchannel_budget_match.group("value"))
+        remaining = max(
+            (
+                thread.player_messages_remaining_for_turn(world_state.turn_number)
+                for thread in _open_backchannel_threads(world_state, action_package)
+                if thread.player_entity_id == action_package.actor_id
+            ),
+            default=0,
+        )
+        if _OPERATORS[op](float(remaining), threshold):
+            return True, ""
+        return (
+            False,
+            f"precondition failed for {action_package.mechanical_id}: "
+            f"backchannel:player_messages_remaining was {remaining}, expected {op}{threshold}",
+        )
+
+    match = _PRECONDITION_RE.match(normalized)
     if not match:
         return False, f"unsupported precondition: {precondition}"
     scope = match.group("scope")
@@ -619,9 +692,28 @@ def _evaluate_precondition(
         return True, ""
     return (
         False,
-        f"precondition failed for {action_package.action_id}: "
+        f"precondition failed for {action_package.mechanical_id}: "
         f"{scope}:{key} was {actual}, expected {op}{threshold}",
     )
+
+
+def _open_backchannel_threads(
+    world_state: WorldStateV2,
+    action_package: ActionPackage,
+) -> list[object]:
+    threads: list[object] = []
+    for target_id in action_package.target_ids:
+        participants = {action_package.actor_id, target_id}
+        for thread in world_state.backchannel_threads.values():
+            status = getattr(thread.status, "value", str(thread.status))
+            if status != "open":
+                continue
+            if thread.expires_turn < world_state.turn_number:
+                continue
+            if not participants.issubset(set(thread.participant_entity_ids)):
+                continue
+            threads.append(thread)
+    return threads
 
 
 def _payload_type_for(
@@ -659,10 +751,6 @@ def _visibility_for(channel: SignalChannel) -> SignalVisibility:
     if channel in {SignalChannel.BACKCHANNEL, SignalChannel.MILITARY}:
         return SignalVisibility.COVERT
     return SignalVisibility.PRIVATE
-
-
-def _cooldown_key(actor_id: str, action_id: str) -> str:
-    return f"cooldown:{actor_id}:{action_id}"
 
 
 def _deterministic_time(turn_number: int) -> datetime:

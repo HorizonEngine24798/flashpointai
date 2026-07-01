@@ -8,15 +8,19 @@ from crisis_room.agents.international_community import InternationalCommunityAge
 from crisis_room.llm.contracts import FakeLLMClient
 from crisis_room.llm.task_contracts import (
     AARSummary,
+    AdvisorCouncilResponse,
     AdvisorResponse,
     EventCandidate,
+    EventCreatorResponse,
     FactionDecision,
+    FactionTurnResponse,
     IntentCompilation,
     InternalDebate,
     InternationalPressure,
     MultiIntentCompilation,
     PerceptionUpdate,
     PublicBrief,
+    SignalDistortionResponse,
 )
 from crisis_room.scenario.schema import build_cuban_missile_crisis_1962_scenario
 from crisis_room.state.signals import PayloadType, SignalChannel, SignalVisibility
@@ -35,7 +39,8 @@ def test_phase5_task_contracts_validate_fake_json() -> None:
                 {
                     "narrative_id": "resolve",
                     "argument": "Credible pressure is needed.",
-                    "preferred_action_id": "public_demand_withdrawal",
+                    "preferred_action_id": "public_statement",
+                    "preferred_capability_id": "cuba_public_withdrawal_demand",
                 }
             ],
             "synthesis": "Use pressure with a private exit.",
@@ -43,18 +48,43 @@ def test_phase5_task_contracts_validate_fake_json() -> None:
     )
     FactionDecision.model_validate(
         {
-            "action_id": "private_kremlin_backchannel",
+            "action_id": "private_diplomacy",
+            "capability_id": "cuba_open_kremlin_channel",
             "target_ids": ["soviet_presidium"],
             "channel": "backchannel",
             "intent_summary": "Open a quiet reciprocal pause channel.",
         }
     )
-    AdvisorResponse.model_validate(
+    FactionTurnResponse.model_validate(
+        {
+            "perception_update": {
+                "situation_summary": "Signals are noisy but pressure is rising.",
+            },
+            "internal_debate": {
+                "positions": [
+                    {
+                        "narrative_id": "resolve",
+                        "argument": "Credible pressure is needed.",
+                    }
+                ],
+                "synthesis": "Use pressure with a private exit.",
+            },
+            "decision": {
+                "action_id": "private_diplomacy",
+                "capability_id": "cuba_open_kremlin_channel",
+                "target_ids": ["soviet_presidium"],
+                "channel": "backchannel",
+                "intent_summary": "Open a quiet reciprocal pause channel.",
+            },
+        }
+    )
+    AdvisorCouncilResponse.model_validate(
         {
             "answer": "The room is split.",
             "advisor_views": [
                 {
-                    "advisor_name": "Diplomatic Advisor",
+                    "advisor_id": "state",
+                    "advisor_name": "State",
                     "stance": "probe quietly",
                     "reasoning": "It preserves off-ramps.",
                 }
@@ -64,7 +94,8 @@ def test_phase5_task_contracts_validate_fake_json() -> None:
     IntentCompilation.model_validate(
         {
             "accepted": True,
-            "action_id": "public_demand_withdrawal",
+            "action_id": "public_statement",
+            "capability_id": "cuba_public_withdrawal_demand",
             "target_ids": ["soviet_presidium"],
             "channel": "public",
             "intent_summary": "Warn publicly.",
@@ -76,7 +107,8 @@ def test_phase5_task_contracts_validate_fake_json() -> None:
             "candidates": [
                 {
                     "accepted": True,
-                    "action_id": "public_demand_withdrawal",
+                    "action_id": "public_statement",
+                    "capability_id": "cuba_public_withdrawal_demand",
                     "target_ids": ["soviet_presidium"],
                     "channel": "public",
                     "intent_summary": "Warn publicly.",
@@ -110,6 +142,27 @@ def test_phase5_task_contracts_validate_fake_json() -> None:
             "summary": "Governments report ongoing consultations.",
         }
     )
+    SignalDistortionResponse.model_validate(
+        {
+            "observed_content": "The report arrives garbled and overstates the warning.",
+            "distortion_note": "Intent was hardened by channel noise.",
+        }
+    )
+    EventCreatorResponse.model_validate(
+        {
+            "public_brief": {
+                "headline": "Crisis Diplomacy Continues",
+                "summary": "Governments report ongoing consultations.",
+            },
+            "event_candidate": {
+                "candidate_id": "media_leak_1",
+                "kind": "media_leak",
+                "title": "Leak Intensifies Public Pressure",
+                "summary": "A partial report circulates internationally.",
+            },
+            "major_event_relevant": True,
+        }
+    )
     AARSummary.model_validate(
         {
             "outcome_summary": "The crisis stabilized.",
@@ -132,8 +185,10 @@ def test_dialogue_engine_uses_player_visible_context_without_truth_leak() -> Non
         {
             "dialogue.us_excomm.advisor_response": {
                 "answer": "The strongest move is a private probe before public escalation.",
+                "council_summary": "State favors a private probe before a public line.",
                 "advisor_views": [
                     {
+                        "advisor_id": "state",
                         "advisor_name": "State",
                         "stance": "backchannel first",
                         "reasoning": "It tests intent without public lock-in.",
@@ -141,12 +196,16 @@ def test_dialogue_engine_uses_player_visible_context_without_truth_leak() -> Non
                     }
                 ],
                 "risk_warnings": ["A public warning may narrow exit options."],
-                "suggested_action_ids": ["private_kremlin_backchannel"],
+                "suggested_capability_ids": ["cuba_open_kremlin_channel"],
+                "suggested_action_ids": ["private_diplomacy"],
                 "visible_context_limits": ["No direct confirmation of rival red lines."],
             }
         }
     )
-    agent = DialogueEngineAgent(action_catalog=scenario.action_catalog)
+    agent = DialogueEngineAgent(
+        action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
+    )
 
     response = agent.respond_to_player(
         world,
@@ -155,7 +214,7 @@ def test_dialogue_engine_uses_player_visible_context_without_truth_leak() -> Non
         llm_client=fake_llm,
     )
 
-    assert response.suggested_action_ids == ["private_kremlin_backchannel"]
+    assert response.suggested_capability_ids == ["cuba_open_kremlin_channel"]
     prompt_text = "\n".join(message.content for message in fake_llm.calls[0].request.messages)
     assert "Rumors Around Cuba Intensify" in prompt_text
     assert "SECRET WAR PLAN" not in prompt_text
@@ -183,13 +242,15 @@ def test_faction_agent_runs_debate_and_returns_valid_catalog_action() -> None:
                     {
                         "narrative_id": "push",
                         "argument": "Exploit hesitation with a public challenge.",
-                        "preferred_action_id": "soviet_public_defiance",
+                        "preferred_action_id": "public_statement",
+                        "preferred_capability_id": "soviet_defiance_statement",
                         "perceived_risk": 0.7,
                     },
                     {
                         "narrative_id": "exit",
                         "argument": "Use a deniable channel to test an exit.",
-                        "preferred_action_id": "soviet_probe_compromise",
+                        "preferred_action_id": "private_diplomacy",
+                        "preferred_capability_id": "soviet_compromise_probe",
                         "target_entity_ids": ["us_excomm"],
                         "perceived_risk": 0.3,
                     },
@@ -198,7 +259,8 @@ def test_faction_agent_runs_debate_and_returns_valid_catalog_action() -> None:
                 "dominant_narrative_id": "exit",
             },
             "faction.soviet_presidium.faction_decision": {
-                "action_id": "soviet_probe_compromise",
+                "action_id": "private_diplomacy",
+                "capability_id": "soviet_compromise_probe",
                 "target_ids": ["us_excomm"],
                 "channel": "backchannel",
                 "intent_summary": "Open a deniable channel to explore a reciprocal pause.",
@@ -209,22 +271,21 @@ def test_faction_agent_runs_debate_and_returns_valid_catalog_action() -> None:
             },
         }
     )
-    agent = FactionAgent("soviet_presidium", scenario.action_catalog)
+    agent = FactionAgent("soviet_presidium", scenario.action_catalog, scenario.capabilities)
 
     output = agent.run_turn(world.actors["soviet_presidium"], world, fake_llm)
 
     assert output.perception_summary.startswith("The opponent appears anxious")
     assert output.action_package is not None
     assert output.action_package.actor_id == "soviet_presidium"
-    assert output.action_package.action_id == "soviet_probe_compromise"
+    assert output.action_package.action_id == "private_diplomacy"
+    assert output.action_package.capability_id == "soviet_compromise_probe"
     assert output.action_package.target_ids == ["us_excomm"]
     assert output.action_package.channel == SignalChannel.BACKCHANNEL
     assert output.action_package.submitted_turn == world.turn_number
     assert world.actors["soviet_presidium"].resources["diplomatic_flexibility"] == 3
     assert [call.request.label for call in fake_llm.calls] == [
-        "faction.soviet_presidium.perception_update",
-        "faction.soviet_presidium.internal_debate",
-        "faction.soviet_presidium.faction_decision",
+        "faction.soviet_presidium.turn",
     ]
 
 
@@ -249,7 +310,11 @@ def test_faction_agent_rejects_non_catalog_decision_without_mutation() -> None:
         }
     )
 
-    output = FactionAgent("soviet_presidium", scenario.action_catalog).run_turn(
+    output = FactionAgent(
+        "soviet_presidium",
+        scenario.action_catalog,
+        scenario.capabilities,
+    ).run_turn(
         world.actors["soviet_presidium"],
         world,
         fake_llm,
@@ -267,7 +332,8 @@ def test_catalog_gamemaster_compiler_validates_llm_intent_against_engine() -> No
         {
             "gamemaster.us_excomm.intent_compilation": {
                 "accepted": True,
-                "action_id": "public_demand_withdrawal",
+                "action_id": "public_statement",
+                "capability_id": "cuba_public_withdrawal_demand",
                 "target_ids": ["soviet_presidium"],
                 "channel": "public",
                 "intent_summary": "Demand removal of Soviet offensive missiles from Cuba.",
@@ -276,7 +342,11 @@ def test_catalog_gamemaster_compiler_validates_llm_intent_against_engine() -> No
             }
         }
     )
-    compiler = CatalogGamemasterCompiler(scenario.action_catalog, fake_llm)
+    compiler = CatalogGamemasterCompiler(
+        scenario.action_catalog,
+        fake_llm,
+        scenario.capabilities,
+    )
 
     compilation = compiler.compile_player_intent(
         world,
@@ -286,12 +356,13 @@ def test_catalog_gamemaster_compiler_validates_llm_intent_against_engine() -> No
 
     assert not compilation.rejected
     assert compilation.action_package is not None
-    assert compilation.action_package.action_id == "public_demand_withdrawal"
+    assert compilation.action_package.action_id == "public_statement"
+    assert compilation.action_package.capability_id == "cuba_public_withdrawal_demand"
     assert compilation.action_package.channel == SignalChannel.PUBLIC
     assert compilation.notes == ["Mapped the player's public demand to the catalog action."]
 
 
-def test_pressure_and_event_agents_emit_signal_candidates_without_state_mutation() -> None:
+def test_pressure_agent_emits_signals_and_event_creator_adds_media_brief() -> None:
     scenario = build_cuban_missile_crisis_1962_scenario()
     world = scenario.create_initial_world(rng_seed=25)
     fake_llm = FakeLLMClient(
@@ -339,8 +410,12 @@ def test_pressure_and_event_agents_emit_signal_candidates_without_state_mutation
     assert len(pressure_output.emitted_signals) == 1
     assert pressure_output.emitted_signals[0].payload_type == PayloadType.MEDIA_REPORT
     assert pressure_output.emitted_signals[0].visibility == SignalVisibility.PUBLIC
-    assert len(event_output.emitted_signals) == 1
-    assert event_output.emitted_signals[0].recipient_entity_ids == ["us_excomm"]
-    assert event_output.emitted_signals[0].channel == SignalChannel.INTEL
+    assert event_output.emitted_signals == []
+    assert event_output.public_timeline_delta[0].title == "Confused Radio Traffic"
+    assert [item["task"] for item in event_output.raw_llm_outputs] == [
+        "event_creator_response",
+        "public_brief",
+        "event_candidate",
+    ]
     assert world.actors["us_excomm"].inbox == []
     assert world.public_timeline.entries[-1].title == "Rumors Around Cuba Intensify"

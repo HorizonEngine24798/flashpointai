@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from crisis_room.agents.info_channel import ChannelRule, InfoChannelConfig, PrototypeInfoChannel
+from crisis_room.llm.contracts import FakeLLMClient
 from crisis_room.scenario.schema import build_cuban_missile_crisis_1962_scenario
 from crisis_room.state.signals import (
     PayloadType,
@@ -115,6 +116,37 @@ def test_info_channel_contradictory_delivery_is_entity_local_only() -> None:
     assert delivery.delivery_id in result.contradicted_delivery_ids
     assert result.world_state.entity_timelines["us_excomm"].entries[-1].metadata["contradictory"]
     assert result.world_state.public_timeline.entries == world.public_timeline.entries
+
+
+def test_llm_distortion_rewrites_public_signal_before_timeline_and_delivery() -> None:
+    scenario = build_cuban_missile_crisis_1962_scenario()
+    world = scenario.create_initial_world(rng_seed=240)
+    distorted_text = "Reports suggest Washington may be hinting at restraint, but terms are unclear."
+    fake_llm = FakeLLMClient(
+        {
+            "info_channel.sig_public_distorted.distorted": {
+                "observed_content": distorted_text,
+                "distortion_note": "Specific non-invasion terms were blurred.",
+            }
+        }
+    )
+    signal = _signal(
+        signal_id="sig_public_distorted",
+        content="Washington publicly promises no invasion if missiles are removed.",
+        channel=SignalChannel.PUBLIC,
+        payload_type=PayloadType.PUBLIC_STATEMENT,
+        visibility=SignalVisibility.PUBLIC,
+        distortion_risk=1.0,
+    )
+
+    result = PrototypeInfoChannel(llm_client=fake_llm).route_signals(world, [signal])
+    routed = result.world_state
+
+    assert routed.public_timeline.entries[-1].summary == distorted_text
+    assert {delivery.observed_content for delivery in result.deliveries} == {distorted_text}
+    assert all(delivery.distortion_applied for delivery in result.deliveries)
+    assert all(delivery.observed_reliability == 0.65 for delivery in result.deliveries)
+    assert fake_llm.calls[0].request.response_schema_name == "SignalDistortionResponse"
 
 
 def test_info_channel_public_signal_reaches_all_entities_and_public_timeline() -> None:

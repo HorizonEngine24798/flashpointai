@@ -8,6 +8,11 @@ from crisis_room.app.planning import build_player_plan_preview, render_player_pl
 from crisis_room.app.turn_orchestrator import TurnOrchestrator
 from crisis_room.llm.scripted_client import ScriptedLLMClient
 from crisis_room.scenario.schema import build_cuban_missile_crisis_1962_scenario
+from crisis_room.state.saves import (
+    load_playable_session,
+    restore_pending_plan,
+    save_playable_session,
+)
 
 
 def test_plan_preview_compiles_actions_and_renders_batch_warnings() -> None:
@@ -16,6 +21,7 @@ def test_plan_preview_compiles_actions_and_renders_batch_warnings() -> None:
     client = ScriptedLLMClient()
     orchestrator = TurnOrchestrator(
         action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
         llm_client=client,
     )
 
@@ -28,17 +34,20 @@ def test_plan_preview_compiles_actions_and_renders_batch_warnings() -> None:
         ),
         gamemaster=orchestrator.gamemaster,
         action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
+        scenario_events=scenario.scenario_events,
     )
     rendered = render_player_plan_preview(
         preview,
         action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
     )
 
     assert preview.is_committable
-    assert [package.action_id for package in preview.compilation.action_packages] == [
-        "announce_quarantine",
-        "private_kremlin_backchannel",
-        "authorize_recon_overflights",
+    assert [package.mechanical_id for package in preview.compilation.action_packages] == [
+        "cuba_announce_naval_quarantine",
+        "cuba_open_kremlin_channel",
+        "cuba_recon_overflights",
     ]
     assert any(
         warning.code == "public_covert_tension"
@@ -47,6 +56,10 @@ def test_plan_preview_compiles_actions_and_renders_batch_warnings() -> None:
     assert rendered.startswith("PLAN PREVIEW")
     assert "Compiled actions:" in rendered
     assert "Agenda warnings:" in rendered
+    assert "Resource pressure:" in rendered
+    assert "Visible flash-event risks:" in rendered
+    assert "Known consequences and risks:" in rendered
+    assert "Quarantine contact nearing the line" in rendered
     assert "Type COMMIT" in rendered
 
 
@@ -56,6 +69,7 @@ def test_committing_precompiled_plan_does_not_recompile_player_intent() -> None:
     client = ScriptedLLMClient()
     orchestrator = TurnOrchestrator(
         action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
         llm_client=client,
     )
     preview = build_player_plan_preview(
@@ -67,6 +81,7 @@ def test_committing_precompiled_plan_does_not_recompile_player_intent() -> None:
         ),
         gamemaster=orchestrator.gamemaster,
         action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
     )
 
     result = orchestrator.run_turn(
@@ -80,13 +95,13 @@ def test_committing_precompiled_plan_does_not_recompile_player_intent() -> None:
     assert result.player_compilation == preview.compilation
     assert not any(label.startswith("gamemaster.") for label in labels)
     assert {
-        package.action_id
+        package.mechanical_id
         for package in result.deterministic_result.accepted_actions
         if package.actor_id == scenario.player_entity_id
-    } == {"private_kremlin_backchannel", "authorize_recon_overflights"}
+    } == {"cuba_open_kremlin_channel", "cuba_recon_overflights"}
     assert {
-        package.action_id for package in result.deterministic_result.scheduled_actions
-    } == {"announce_quarantine"}
+        package.mechanical_id for package in result.deterministic_result.scheduled_actions
+    } == {"cuba_announce_naval_quarantine"}
 
 
 def test_plan_previews_are_saved_without_mutating_world_state() -> None:
@@ -95,6 +110,7 @@ def test_plan_previews_are_saved_without_mutating_world_state() -> None:
     client = ScriptedLLMClient()
     orchestrator = TurnOrchestrator(
         action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
         llm_client=client,
     )
     preview = build_player_plan_preview(
@@ -103,10 +119,12 @@ def test_plan_previews_are_saved_without_mutating_world_state() -> None:
         player_intent="open a private Kremlin backchannel for reciprocal restraint",
         gamemaster=orchestrator.gamemaster,
         action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
     )
     rendered = render_player_plan_preview(
         preview,
         action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
     )
     recorder = DebugSessionRecorder(
         world_state=world,
@@ -125,13 +143,49 @@ def test_plan_previews_are_saved_without_mutating_world_state() -> None:
 
     assert loaded.world_state.turn_number == world.turn_number
     assert loaded.plan_previews[0].preview.player_intent == preview.player_intent
-    assert loaded.plan_previews[0].preview.compilation.action_packages[0].action_id == (
-        "private_kremlin_backchannel"
+    assert loaded.plan_previews[0].preview.compilation.action_packages[0].mechanical_id == (
+        "cuba_open_kremlin_channel"
     )
     assert loaded.plan_previews[0].llm_calls[0].request.label == (
         "gamemaster.us_excomm.intent_compilation"
     )
     assert "PLAN PREVIEW" in loaded.rendered_log[-1]
+
+
+def test_playable_saves_restore_pending_uncommitted_plan() -> None:
+    scenario = build_cuban_missile_crisis_1962_scenario()
+    world = scenario.create_initial_world(rng_seed=94)
+    client = ScriptedLLMClient()
+    orchestrator = TurnOrchestrator(
+        action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
+        llm_client=client,
+    )
+    preview = build_player_plan_preview(
+        world,
+        player_entity_id=scenario.player_entity_id,
+        player_intent="open a private Kremlin backchannel for reciprocal restraint",
+        gamemaster=orchestrator.gamemaster,
+        action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
+    )
+
+    path = save_playable_session(
+        world_state=world,
+        player_entity_id=scenario.player_entity_id,
+        output_dir=_test_output_dir("playable_save"),
+        pending_plan=preview,
+    )
+    loaded = load_playable_session(path)
+    restored = restore_pending_plan(loaded)
+
+    assert loaded.pending_plan is not None
+    assert restored is not None
+    assert restored.player_intent == preview.player_intent
+    assert restored.compilation.action_packages[0].mechanical_id == "cuba_open_kremlin_channel"
+
+    loaded.world_state.turn_number += 1
+    assert restore_pending_plan(loaded) is None
 
 
 def _test_output_dir(name: str) -> Path:

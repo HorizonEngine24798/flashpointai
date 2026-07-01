@@ -2,30 +2,44 @@ from __future__ import annotations
 
 from crisis_room.agents.base import AgentOutput
 from crisis_room.agents.context import build_task_request, build_visible_context
-from crisis_room.engine.actions import ActionDefinition, ActionPackage
+from crisis_room.config.gameplay import (
+    FACTION_DEBATE_MAX_TOKENS,
+    FACTION_DECISION_MAX_TOKENS,
+    FACTION_PERCEPTION_MAX_TOKENS,
+    FACTION_TURN_MAX_TOKENS,
+    NESTED_LLM_CONTEXT_LIMIT,
+)
+from crisis_room.engine.actions import ActionDefinition, ActionPackage, ScenarioCapability
 from crisis_room.engine.adjudication import DeterministicEngineV2
 from crisis_room.llm.contracts import LLMClient
 from crisis_room.llm.task_contracts import (
     FactionDecision,
+    FactionTurnResponse,
     InternalDebate,
     PerceptionUpdate,
 )
 from crisis_room.state.world import EntityState, WorldStateV2
 
 
-NESTED_LLM_CONTEXT_LIMIT = 6
-
-
 class FactionAgent:
-    """LLM-driven faction agent with perception, debate, and decision phases."""
+    """LLM-driven faction agent with a single rich perception/debate/decision call."""
 
-    def __init__(self, entity_id: str, action_catalog: list[ActionDefinition]) -> None:
+    def __init__(
+        self,
+        entity_id: str,
+        action_catalog: list[ActionDefinition],
+        capabilities: list[ScenarioCapability] | None = None,
+    ) -> None:
         self.entity_id = entity_id
         self.action_catalog = action_catalog
+        self.capabilities = capabilities or []
         self._catalog_by_id = {
             definition.action_id: definition for definition in action_catalog
         }
-        self._engine = DeterministicEngineV2(action_catalog)
+        self._capabilities_by_id = {
+            capability.capability_id: capability for capability in self.capabilities
+        }
+        self._engine = DeterministicEngineV2(action_catalog, self.capabilities)
 
     def run_turn(
         self,
@@ -37,21 +51,12 @@ class FactionAgent:
             entity_state,
             world_state,
             action_catalog=self.action_catalog,
+            capabilities=self.capabilities,
         )
-        perception = self._run_perception(visible_context, world_state, llm_client)
-        debate = self._run_debate(
-            visible_context,
-            perception,
-            world_state,
-            llm_client,
-        )
-        decision = self._run_decision(
-            visible_context,
-            perception,
-            debate,
-            world_state,
-            llm_client,
-        )
+        turn_response = self._run_faction_turn(visible_context, world_state, llm_client)
+        perception = turn_response.perception_update
+        debate = turn_response.internal_debate
+        decision = turn_response.decision
         action_package, packaging_notes = self._build_action_package(
             decision,
             entity_state,
@@ -65,12 +70,51 @@ class FactionAgent:
             ] + [debate.synthesis],
             action_package=action_package,
             raw_llm_outputs=[
+                {"task": "faction_turn", "response": turn_response.model_dump(mode="json")},
                 {"task": "perception_update", "response": perception.model_dump(mode="json")},
                 {"task": "internal_debate", "response": debate.model_dump(mode="json")},
                 {"task": "faction_decision", "response": decision.model_dump(mode="json")},
             ],
-            debug_notes=packaging_notes,
+            debug_notes=[*packaging_notes, *turn_response.self_critique],
         )
+
+    def _run_faction_turn(
+        self,
+        visible_context: dict[str, object],
+        world_state: WorldStateV2,
+        llm_client: LLMClient,
+    ) -> FactionTurnResponse:
+        request = build_task_request(
+            label=f"faction.{self.entity_id}.turn",
+            system_prompt=(
+                "You are a faction crisis-room cell. In one structured response, "
+                "simulate how this entity perceives the turn, argues with itself, "
+                "red-teams the tempting options, and settles on a legal catalog "
+                "action or a deliberate no-action choice. Use only visible context."
+            ),
+            visible_context=visible_context,
+            task_instruction=(
+                "Return a FactionTurnResponse. First produce an entity-local "
+                "perception_update grounded in visible public timeline, local "
+                "timeline, inbox, beliefs, resources, public metrics, and known "
+                "commitments. Then produce an internal_debate with distinct "
+                "narrative positions that disagree over interpretation, timing, "
+                "risk, credibility, off-ramps, red lines, or restraint; include "
+                "preferred visible action_id and capability_id values when a "
+                "position has one. The synthesis must explain what tradeoff won. "
+                "Finally produce decision using only visible generic action ids, "
+                "capability ids, target ids, allowed channels, and parameter keys. "
+                "If no legal catalog action fits, leave action_id and capability_id "
+                "null, target_ids empty, and explain no_action_reason. Use "
+                "self_critique for doubts or red-team objections that made the "
+                "decision more cautious. Do not claim deterministic effects have "
+                "already happened."
+            ),
+            response_schema_name="FactionTurnResponse",
+            metadata={"agent": self.entity_id, "turn_number": world_state.turn_number},
+            max_tokens=FACTION_TURN_MAX_TOKENS,
+        )
+        return llm_client.complete_json(request, FactionTurnResponse)
 
     def _run_perception(
         self,
@@ -95,7 +139,7 @@ class FactionAgent:
             ),
             response_schema_name="PerceptionUpdate",
             metadata={"agent": self.entity_id, "turn_number": world_state.turn_number},
-            max_tokens=1000,
+            max_tokens=FACTION_PERCEPTION_MAX_TOKENS,
         )
         return llm_client.complete_json(request, PerceptionUpdate)
 
@@ -118,13 +162,14 @@ class FactionAgent:
             visible_context=debate_context,
             task_instruction=(
                 "Generate the competing narrative positions and a synthesis. "
-                "Preferred actions must refer to catalog action ids when possible. "
+                "Preferred actions must refer to visible generic action ids and "
+                "capability ids when possible. "
                 "Make each position argue a different interpretation of risk, red "
                 "lines, timing, or restraint rather than repeating the same stance."
             ),
             response_schema_name="InternalDebate",
             metadata={"agent": self.entity_id, "turn_number": world_state.turn_number},
-            max_tokens=1300,
+            max_tokens=FACTION_DEBATE_MAX_TOKENS,
         )
         return llm_client.complete_json(request, InternalDebate)
 
@@ -149,15 +194,17 @@ class FactionAgent:
             visible_context=decision_context,
             task_instruction=(
                 "Return the final faction decision. Use action_id only from the "
-                "visible action catalog, target_ids only from visible entity ids, "
-                "and a channel allowed by that action. If no catalog action fits, "
-                "leave action_id null and explain no_action_reason. Private rationale "
+                "visible generic action ids, capability_id only from visible "
+                "capabilities, target_ids only from visible entity ids, parameters "
+                "only from the capability schema, and a channel allowed by that "
+                "capability. If no catalog action fits, leave action_id and "
+                "capability_id null and explain no_action_reason. Private rationale "
                 "may use this entity's goals and debate, but do not claim that the "
                 "action has already succeeded."
             ),
             response_schema_name="FactionDecision",
             metadata={"agent": self.entity_id, "turn_number": world_state.turn_number},
-            max_tokens=1200,
+            max_tokens=FACTION_DECISION_MAX_TOKENS,
         )
         return llm_client.complete_json(request, FactionDecision)
 
@@ -173,12 +220,19 @@ class FactionAgent:
             return None, [reason]
         if decision.action_id not in self._catalog_by_id:
             return None, [f"decision referenced non-catalog action: {decision.action_id}"]
+        if self.capabilities and not decision.capability_id:
+            return None, ["decision omitted required capability_id"]
+        if decision.capability_id and decision.capability_id not in self._capabilities_by_id:
+            return None, [
+                f"decision referenced non-catalog capability: {decision.capability_id}"
+            ]
         if not decision.intent_summary.strip():
             return None, ["decision intent_summary is empty"]
 
         package = ActionPackage(
             actor_id=entity_state.entity_id,
             action_id=decision.action_id,
+            capability_id=decision.capability_id,
             target_ids=decision.target_ids,
             channel=decision.channel,
             intent_summary=decision.intent_summary,
@@ -193,6 +247,7 @@ class FactionAgent:
                 "created_by": "FactionAgent",
                 "confidence": decision.confidence,
             },
+            parameters=decision.parameters,
         )
         validation = self._engine.validate_action(world_state, package)
         if not validation.is_valid:

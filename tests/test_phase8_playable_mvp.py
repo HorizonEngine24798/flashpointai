@@ -23,6 +23,7 @@ def test_scripted_client_makes_cuba_scenario_playable_without_live_llm() -> None
     client = ScriptedLLMClient()
     orchestrator = TurnOrchestrator(
         action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
         llm_client=client,
     )
 
@@ -40,23 +41,23 @@ def test_scripted_client_makes_cuba_scenario_playable_without_live_llm() -> None
     assert first.world_state.turn_number == 2
     assert second.world_state.turn_number == 3
     assert {
-        action.action_id for action in first.deterministic_result.accepted_actions
+        action.mechanical_id for action in first.deterministic_result.accepted_actions
     } == {
-        "public_demand_withdrawal",
-        "soviet_probe_compromise",
-        "cuban_air_defense_alert",
-        "nato_reassurance_request",
+        "cuba_public_withdrawal_demand",
+        "soviet_compromise_probe",
+        "cuba_air_defense_alert",
+        "nato_reassurance_pressure",
     }
     assert {
-        action.action_id for action in second.deterministic_result.accepted_actions
+        action.mechanical_id for action in second.deterministic_result.accepted_actions
     } == {
-        "private_kremlin_backchannel",
-        "soviet_probe_compromise",
-        "cuban_air_defense_alert",
-        "nato_reassurance_request",
+        "cuba_open_kremlin_channel",
+        "soviet_compromise_probe",
+        "cuba_air_defense_alert",
+        "nato_reassurance_pressure",
     }
-    assert len(first.debug_transcript.llm_calls) == 12
-    assert len(second.debug_transcript.llm_calls) == 12
+    assert len(first.debug_transcript.llm_calls) == 6
+    assert len(second.debug_transcript.llm_calls) == 6
     assert second.world_state.actors["us_excomm"].inbox
 
     recorder = DebugSessionRecorder(
@@ -80,6 +81,7 @@ def test_multi_action_player_turn_compiles_and_resolves_as_agenda_batch() -> Non
     world = scenario.create_initial_world(rng_seed=43)
     orchestrator = TurnOrchestrator(
         action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
         llm_client=ScriptedLLMClient(),
     )
 
@@ -92,19 +94,19 @@ def test_multi_action_player_turn_compiles_and_resolves_as_agenda_batch() -> Non
         ),
     )
 
-    assert [package.action_id for package in result.player_compilation.action_packages] == [
-        "announce_quarantine",
-        "private_kremlin_backchannel",
-        "authorize_recon_overflights",
+    assert [package.mechanical_id for package in result.player_compilation.action_packages] == [
+        "cuba_announce_naval_quarantine",
+        "cuba_open_kremlin_channel",
+        "cuba_recon_overflights",
     ]
     assert {
-        package.action_id for package in result.deterministic_result.scheduled_actions
-    } == {"announce_quarantine"}
+        package.mechanical_id for package in result.deterministic_result.scheduled_actions
+    } == {"cuba_announce_naval_quarantine"}
     assert {
-        package.action_id
+        package.mechanical_id
         for package in result.deterministic_result.accepted_actions
         if package.actor_id == scenario.player_entity_id
-    } == {"private_kremlin_backchannel", "authorize_recon_overflights"}
+    } == {"cuba_open_kremlin_channel", "cuba_recon_overflights"}
     assert "compiled actions: 3" in result.debug_transcript.rendered_text
     assert result.aftermath_report.accepted_actions
     assert result.aftermath_report.scheduled_actions
@@ -115,6 +117,7 @@ def test_multi_action_compiler_caps_player_agenda_at_three() -> None:
     world = scenario.create_initial_world(rng_seed=44)
     orchestrator = TurnOrchestrator(
         action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
         llm_client=ScriptedLLMClient(),
     )
 
@@ -128,7 +131,33 @@ def test_multi_action_compiler_caps_player_agenda_at_three() -> None:
     )
 
     assert len(result.player_compilation.action_packages) == 3
-    assert any("rejected intent" in note for note in result.player_compilation.notes)
+    assert result.player_compilation.unprocessed_intents
+    assert any("unprocessed intent" in note for note in result.player_compilation.notes)
+
+
+def test_multi_action_compiler_hard_rejects_excessive_agendas() -> None:
+    scenario = build_cuban_missile_crisis_1962_scenario()
+    world = scenario.create_initial_world(rng_seed=440)
+    orchestrator = TurnOrchestrator(
+        action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
+        llm_client=ScriptedLLMClient(),
+    )
+
+    result = orchestrator.run_turn(
+        world,
+        player_entity_id=scenario.player_entity_id,
+        player_intent=(
+            "float a Jupiter trade, offer a non-invasion pledge, prepare an air strike, "
+            "raise DEFCON readiness, authorize recon overflights, announce a naval "
+            "quarantine, issue a public demand, and keep a backchannel open"
+        ),
+    )
+
+    assert result.player_compilation.rejected
+    assert not result.player_compilation.action_packages
+    assert result.player_compilation.unprocessed_intents
+    assert any("hard maximum" in error for error in result.player_compilation.errors)
 
 
 def test_turn_briefing_renders_problems_pressure_agenda_and_action_cards() -> None:
@@ -139,13 +168,14 @@ def test_turn_briefing_renders_problems_pressure_agenda_and_action_cards() -> No
         world,
         player_entity_id=scenario.player_entity_id,
         action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
     )
     rendered = render_turn_briefing(briefing)
 
     assert briefing.problems
     assert briefing.pressure_indicators
     assert briefing.agenda_budget.max_actions == 3
-    assert any(card.action_id == "private_kremlin_backchannel" for card in briefing.action_cards)
+    assert any(card.capability_id == "cuba_open_kremlin_channel" for card in briefing.action_cards)
     assert "Problems on the table:" in rendered
     assert "Agenda this turn:" in rendered
     assert "Action cards:" in rendered
@@ -158,6 +188,7 @@ def test_after_action_report_summarizes_player_consequences_before_debug() -> No
     world = scenario.create_initial_world(rng_seed=46)
     orchestrator = TurnOrchestrator(
         action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
         llm_client=ScriptedLLMClient(),
     )
 
@@ -170,6 +201,8 @@ def test_after_action_report_summarizes_player_consequences_before_debug() -> No
 
     assert rendered.startswith("RESULTS")
     assert "Accepted:" in rendered
+    assert "Media desk:" in rendered
+    assert "Reconnaissance Confusion" in rendered
     assert "Immediate consequences:" in rendered
     assert "ORCHESTRATED TURN DEBUG" not in rendered
     assert "Council reaction:" in rendered
@@ -196,7 +229,10 @@ def test_dialogue_records_are_saved_in_debug_session() -> None:
     scenario = build_cuban_missile_crisis_1962_scenario()
     world = scenario.create_initial_world(rng_seed=42)
     client = ScriptedLLMClient()
-    dialogue = DialogueEngineAgent(action_catalog=scenario.action_catalog)
+    dialogue = DialogueEngineAgent(
+        action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
+    )
     call_start = len(client.calls)
 
     response = dialogue.respond_to_player(
@@ -218,7 +254,7 @@ def test_dialogue_records_are_saved_in_debug_session() -> None:
     )
     loaded = load_debug_session(recorder.save())
 
-    assert loaded.dialogue_records[0].response.suggested_action_ids
+    assert loaded.dialogue_records[0].response.suggested_capability_ids
     assert loaded.dialogue_records[0].llm_calls[0].request.label == (
         "dialogue.us_excomm.advisor_response"
     )
@@ -230,7 +266,7 @@ def test_tui_formats_live_llm_errors_as_readable_blocks() -> None:
         LlamaCppJSONError(
             "llama.cpp response did not satisfy JSON contract; "
             "task_label=dialogue.us_excomm.advisor_response; "
-            "schema=AdvisorResponse; attempts=2; "
+            "schema=AdvisorCouncilResponse; attempts=2; "
             "diagnostic_artifact=output/diagnostics/ai_invalid_json/example.json"
         ),
     )
@@ -238,7 +274,7 @@ def test_tui_formats_live_llm_errors_as_readable_blocks() -> None:
     assert rendered.startswith("Advisor dialogue failed.")
     assert "Live LLM error: LlamaCppJSONError" in rendered
     assert "  task_label=dialogue.us_excomm.advisor_response" in rendered
-    assert "  schema=AdvisorResponse" in rendered
+    assert "  schema=AdvisorCouncilResponse" in rendered
     assert "  diagnostic_artifact=output/diagnostics/ai_invalid_json/example.json" in rendered
     assert "Traceback" not in rendered
 

@@ -9,12 +9,13 @@ from crisis_room.state.signals import PayloadType, SignalChannel, SignalVisibili
 def test_engine_v2_rejects_invalid_channel_and_insufficient_resources() -> None:
     scenario = build_cuban_missile_crisis_1962_scenario()
     world = scenario.create_initial_world(rng_seed=7)
-    engine = DeterministicEngineV2(scenario.action_catalog)
+    engine = DeterministicEngineV2(scenario.action_catalog, scenario.capabilities)
 
     bad_channel = ActionPackage(
         package_id="pkg_bad_channel",
         actor_id="us_excomm",
-        action_id="private_kremlin_backchannel",
+        action_id="private_diplomacy",
+        capability_id="cuba_open_kremlin_channel",
         target_ids=["soviet_presidium"],
         channel=SignalChannel.PUBLIC,
         intent_summary="Try to quietly open a public backchannel contradiction.",
@@ -30,14 +31,15 @@ def test_engine_v2_rejects_invalid_channel_and_insufficient_resources() -> None:
     assert any("insufficient resources" in error for error in validation.errors)
 
 
-def test_engine_v2_resolves_private_kremlin_backchannel_effects_and_signal() -> None:
+def test_engine_v2_resolves_private_kremlin_channel_capability_effects_and_signal() -> None:
     scenario = build_cuban_missile_crisis_1962_scenario()
     world = scenario.create_initial_world(rng_seed=11)
-    engine = DeterministicEngineV2(scenario.action_catalog)
+    engine = DeterministicEngineV2(scenario.action_catalog, scenario.capabilities)
     action = ActionPackage(
         package_id="pkg_backchannel",
         actor_id="us_excomm",
-        action_id="private_kremlin_backchannel",
+        action_id="private_diplomacy",
+        capability_id="cuba_open_kremlin_channel",
         target_ids=["soviet_presidium"],
         channel=SignalChannel.BACKCHANNEL,
         intent_summary="Open a quiet channel for a reciprocal pause.",
@@ -56,7 +58,7 @@ def test_engine_v2_resolves_private_kremlin_backchannel_effects_and_signal() -> 
     assert resolved.relationships["us_excomm->soviet_presidium"]["trust"] == 0.1
     assert len(result.emitted_signals) == 1
     signal = result.emitted_signals[0]
-    assert signal.signal_id == "sig_1_pkg_backchannel_private_kremlin_backchannel"
+    assert signal.signal_id == "sig_1_pkg_backchannel_cuba_open_kremlin_channel"
     assert signal.recipient_entity_ids == ["soviet_presidium"]
     assert signal.payload_type == PayloadType.BACKCHANNEL_MESSAGE
     assert signal.visibility == SignalVisibility.COVERT
@@ -68,11 +70,12 @@ def test_engine_v2_resolves_private_kremlin_backchannel_effects_and_signal() -> 
 def test_engine_v2_public_action_writes_public_timeline() -> None:
     scenario = build_cuban_missile_crisis_1962_scenario()
     world = scenario.create_initial_world(rng_seed=12)
-    engine = DeterministicEngineV2(scenario.action_catalog)
+    engine = DeterministicEngineV2(scenario.action_catalog, scenario.capabilities)
     action = ActionPackage(
         package_id="pkg_public",
         actor_id="us_excomm",
-        action_id="public_demand_withdrawal",
+        action_id="public_statement",
+        capability_id="cuba_public_withdrawal_demand",
         target_ids=["soviet_presidium"],
         channel=SignalChannel.PUBLIC,
         intent_summary="Warn publicly against further deployments.",
@@ -95,11 +98,12 @@ def test_engine_v2_public_action_writes_public_timeline() -> None:
 def test_engine_v2_schedules_and_completes_prepared_action_without_double_cost() -> None:
     scenario = build_cuban_missile_crisis_1962_scenario()
     world = scenario.create_initial_world(rng_seed=13)
-    engine = DeterministicEngineV2(scenario.action_catalog)
+    engine = DeterministicEngineV2(scenario.action_catalog, scenario.capabilities)
     action = ActionPackage(
         package_id="pkg_prepare",
         actor_id="us_excomm",
-        action_id="announce_quarantine",
+        action_id="military_posture",
+        capability_id="cuba_announce_naval_quarantine",
         target_ids=["soviet_presidium", "cuba"],
         channel=SignalChannel.PUBLIC,
         intent_summary="Announce and prepare a naval quarantine posture.",
@@ -129,18 +133,19 @@ def test_engine_v2_schedules_and_completes_prepared_action_without_double_cost()
     assert completed_world.hidden_clocks["nuclear_escalation"] == 0.42
     assert completed_world.hidden_clocks["quarantine_incident_risk"] == 0.36
     assert completed_result.emitted_signals[0].signal_id == (
-        "sig_2_pkg_prepare_announce_quarantine"
+        "sig_2_pkg_prepare_cuba_announce_naval_quarantine"
     )
 
 
-def test_engine_v2_cooldown_blocks_repeat_action_until_ready() -> None:
+def test_engine_v2_repeat_action_pressure_comes_from_resources() -> None:
     scenario = build_cuban_missile_crisis_1962_scenario()
     world = scenario.create_initial_world(rng_seed=14)
-    engine = DeterministicEngineV2(scenario.action_catalog)
+    engine = DeterministicEngineV2(scenario.action_catalog, scenario.capabilities)
     action = ActionPackage(
         package_id="pkg_prepare",
         actor_id="us_excomm",
-        action_id="announce_quarantine",
+        action_id="military_posture",
+        capability_id="cuba_announce_naval_quarantine",
         target_ids=["soviet_presidium", "cuba"],
         channel=SignalChannel.PUBLIC,
         intent_summary="Announce and prepare a naval quarantine posture.",
@@ -151,8 +156,13 @@ def test_engine_v2_cooldown_blocks_repeat_action_until_ready() -> None:
     repeat = action.model_copy(update={"package_id": "pkg_repeat"})
     validation = engine.validate_action(scheduled_world, repeat)
 
-    assert not validation.is_valid
-    assert any("cooldown until turn 3" in error for error in validation.errors)
+    assert validation.is_valid
+
+    scheduled_world.actors["us_excomm"].resources["alliance_credit"] = 0
+    blocked = engine.validate_action(scheduled_world, repeat)
+
+    assert not blocked.is_valid
+    assert any("insufficient resources" in error for error in blocked.errors)
 
 
 def test_engine_v2_preconditions_use_metrics_and_clocks() -> None:
@@ -189,12 +199,13 @@ def test_engine_v2_replay_is_deterministic_for_same_world_and_actions() -> None:
     action = ActionPackage(
         package_id="pkg_replay",
         actor_id="us_excomm",
-        action_id="private_kremlin_backchannel",
+        action_id="private_diplomacy",
+        capability_id="cuba_open_kremlin_channel",
         target_ids=["soviet_presidium"],
         channel=SignalChannel.BACKCHANNEL,
         intent_summary="Open a quiet channel for replay verification.",
     )
-    engine = DeterministicEngineV2(scenario.action_catalog)
+    engine = DeterministicEngineV2(scenario.action_catalog, scenario.capabilities)
 
     first = engine.resolve_actions(world, [action])
     second = engine.resolve_actions(world, [action])

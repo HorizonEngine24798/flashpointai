@@ -7,6 +7,7 @@ from typing import Sequence
 from crisis_room.agents.dialogue_engine import DialogueEngineAgent
 from crisis_room.agents.gamemaster import GamemasterCompilation
 from crisis_room.app.backchannels import (
+    prepare_backchannel_message,
     render_backchannel_direct_message_result,
     render_backchannel_threads,
     resolve_backchannel_target,
@@ -24,14 +25,31 @@ from crisis_room.app.planning import (
     render_player_plan_preview,
 )
 from crisis_room.app.turn_orchestrator import TurnOrchestrator
+from crisis_room.config.gameplay import HARD_ACTION_BUDGET, NORMAL_ACTION_BUDGET
 from crisis_room.config.settings import load_settings
-from crisis_room.engine.actions import ActionDefinition
+from crisis_room.engine.actions import ActionDefinition, ScenarioCapability
 from crisis_room.llm.contracts import LLMCallRecord, LLMClient
 from crisis_room.llm.diagnostics import LlamaCppError
 from crisis_room.llm.llama_cpp_client import LlamaCppServerClient
-from crisis_room.llm.scripted_client import ScriptedLLMClient
-from crisis_room.llm.task_contracts import AdvisorResponse
-from crisis_room.scenario.schema import Scenario, build_cuban_missile_crisis_1962_scenario
+from crisis_room.llm.task_contracts import AdvisorCouncilResponse
+from crisis_room.scenario.endings import (
+    accept_ending_offer,
+    reject_ending_offer,
+    render_active_ending_offers,
+)
+from crisis_room.scenario.loader import (
+    DEFAULT_SCENARIO_ID,
+    ScenarioLoadError,
+    load_scenario,
+)
+from crisis_room.scenario.schema import Scenario
+from crisis_room.scenario.event_choices import build_event_choice_action
+from crisis_room.state.saves import (
+    load_playable_session,
+    pending_plan_matches_world,
+    restore_pending_plan,
+    save_playable_session,
+)
 from crisis_room.state.world import WorldStateV2
 
 
@@ -50,7 +68,7 @@ ASK <text>     Ask advisors a question
 <text>         Same as ASK <text>
 PLAN <text>    Preview compiled actions without resolving a turn
 COMMIT         Resolve the last previewed plan
-ACTION <text>  Submit up to 3 formal actions and resolve one turn
+ACTION <text>  Submit formal actions and resolve one turn
 BACKCHANNEL <target> <message>
                Send one scarce direct message through an open thread
 END            Take no formal action and let the turn resolve
@@ -58,6 +76,13 @@ BRIEFING       Reprint problems, pressure, agenda, and action cards
 STATUS         Same as BRIEFING
 ADVISORS       Show persistent council state
 BACKCHANNELS   Show active backchannel threads
+EVENT <choice> <option>
+               Commit a pending event choice as a formal action
+ENDING         Show active ending offers
+ACCEPT ENDING [offer]
+               Accept an offered ending and conclude the crisis
+REJECT ENDING [offer]
+               Reject an offered ending and continue
 DEBUG          Toggle raw turn debug output
 SAVE           Save the session JSON now
 HELP           Show commands
@@ -67,21 +92,56 @@ QUIT           Save, exit, and close the managed server
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = _parse_args(argv)
-    scenario = build_cuban_missile_crisis_1962_scenario()
+    if args.action_budget < 0:
+        print("Invalid action budget: value must be non-negative.")
+        return
+    if args.hard_action_limit < args.action_budget:
+        print("Invalid hard action limit: value must be greater than or equal to action budget.")
+        return
+    try:
+        scenario = load_scenario(args.scenario, scenario_dir=args.scenario_dir)
+    except ScenarioLoadError as exc:
+        print(_format_runtime_error("Scenario load", exc))
+        return
     world = scenario.create_initial_world(rng_seed=args.seed)
     player_id = scenario.player_entity_id
+    pending_plan = None
+    if args.load_save is not None:
+        try:
+            loaded_save = load_playable_session(args.load_save)
+        except Exception as exc:
+            print(_format_runtime_error("Load playable save", exc))
+            return
+        if loaded_save.scenario_id != scenario.scenario_id:
+            print(
+                "Load playable save failed: "
+                f"save scenario {loaded_save.scenario_id!r} does not match "
+                f"{scenario.scenario_id!r}."
+            )
+            return
+        world = loaded_save.world_state
+        player_id = loaded_save.player_entity_id
+        pending_plan = restore_pending_plan(loaded_save)
     try:
-        llm_client = _build_llm_client(args.llm)
+        llm_client = _build_llm_client()
     except Exception as exc:
         print(_format_runtime_error("Local LLM startup", exc))
         return
     try:
         orchestrator = TurnOrchestrator(
             action_catalog=scenario.action_catalog,
+            capabilities=scenario.capabilities,
             scenario_events=scenario.scenario_events,
+            scenario_endings=scenario.scenario_endings,
+            event_settings=scenario.event_settings,
             llm_client=llm_client,
+            action_budget=args.action_budget,
+            hard_action_limit=args.hard_action_limit,
         )
-        dialogue_engine = DialogueEngineAgent(action_catalog=scenario.action_catalog)
+        dialogue_engine = DialogueEngineAgent(
+            action_catalog=scenario.action_catalog,
+            capabilities=scenario.capabilities,
+        )
         recorder = DebugSessionRecorder(
             world_state=world,
             player_entity_id=player_id,
@@ -92,7 +152,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         print(f"SCENARIO: {scenario.metadata.title}")
         print(scenario.intro_text)
         print()
-        _print_status(world, player_id, scenario.action_catalog)
+        _print_status(
+            world,
+            player_id,
+            scenario.action_catalog,
+            scenario.capabilities,
+            action_budget=args.action_budget,
+        )
         print(HELP_TEXT)
 
         world = _input_loop(
@@ -103,7 +169,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             orchestrator=orchestrator,
             dialogue_engine=dialogue_engine,
             recorder=recorder,
+            save_dir=args.save_dir,
             max_turns=args.max_turns,
+            pending_plan=pending_plan,
             command_source=_demo_commands() if args.demo else None,
         )
     finally:
@@ -119,12 +187,15 @@ def _input_loop(
     orchestrator: TurnOrchestrator,
     dialogue_engine: DialogueEngineAgent,
     recorder: DebugSessionRecorder,
+    save_dir: Path,
     max_turns: int,
+    pending_plan: PlayerPlanPreview | None = None,
     command_source: list[str] | None,
 ) -> WorldStateV2:
     command_index = 0
     debug_mode = False
-    pending_plan: PlayerPlanPreview | None = None
+    if pending_plan is not None:
+        print("Loaded pending plan. Type COMMIT to resolve it, PLAN <text> to replace it, or HELP.\n")
     while True:
         try:
             if command_source is None:
@@ -134,20 +205,41 @@ def _input_loop(
                 command_index += 1
                 print(f"> {user_text}")
             else:
-                path = recorder.save()
-                print(f"Command script finished. Saved session: {path}")
+                debug_path = recorder.save()
+                playable_path = _save_playable(
+                    world,
+                    player_id,
+                    save_dir,
+                    pending_plan=pending_plan,
+                )
+                print(f"Command script finished. Saved playable session: {playable_path}")
+                print(f"Saved debug session: {debug_path}")
                 return world
         except EOFError:
-            path = recorder.save()
-            print(f"\nInput ended. Saved session: {path}")
+            debug_path = recorder.save()
+            playable_path = _save_playable(
+                world,
+                player_id,
+                save_dir,
+                pending_plan=pending_plan,
+            )
+            print(f"\nInput ended. Saved playable session: {playable_path}")
+            print(f"Saved debug session: {debug_path}")
             return world
         user_text = user_text.strip().lstrip("\ufeff")
         if not user_text:
             continue
         command = user_text.upper()
         if command == "QUIT":
-            path = recorder.save()
-            print(f"Saved session: {path}")
+            debug_path = recorder.save()
+            playable_path = _save_playable(
+                world,
+                player_id,
+                save_dir,
+                pending_plan=pending_plan,
+            )
+            print(f"Saved playable session: {playable_path}")
+            print(f"Saved debug session: {debug_path}")
             print("Exiting game.")
             return world
         if command == "HELP":
@@ -158,14 +250,74 @@ def _input_loop(
             print(f"Debug output: {'on' if debug_mode else 'off'}")
             continue
         if command in {"STATUS", "BRIEFING", "NEXT"}:
-            _print_status(world, player_id, scenario.action_catalog)
+            _print_status(
+                world,
+                player_id,
+                scenario.action_catalog,
+                scenario.capabilities,
+                action_budget=orchestrator.action_budget,
+            )
             continue
         if command == "ADVISORS":
-            _print_advisors(world, player_id)
+            _print_advisors(world, player_id, debug_mode=debug_mode)
             continue
         if command == "BACKCHANNELS":
             print(render_backchannel_threads(world, viewer_entity_id=player_id))
             print()
+            continue
+        if command in {"ENDING", "ENDINGS"}:
+            print(render_active_ending_offers(world, player_entity_id=player_id))
+            print()
+            continue
+        if command == "ACCEPT ENDING" or command.startswith("ACCEPT ENDING "):
+            query = user_text[len("ACCEPT ENDING") :].strip() or "latest"
+            decision = accept_ending_offer(
+                world,
+                player_entity_id=player_id,
+                offer_query=query,
+            )
+            if decision.errors:
+                print()
+                print("ACCEPT ENDING FAILED")
+                for error in decision.errors:
+                    print(f"- {error}")
+                print()
+                continue
+            world = decision.world_state
+            pending_plan = None
+            recorder.update_world_state(world, rendered_log_entry=decision.summary)
+            debug_path = recorder.save()
+            playable_path = _save_playable(world, player_id, save_dir)
+            print()
+            print(decision.summary)
+            print(f"Saved playable session: {playable_path}")
+            print(f"Saved debug session: {debug_path}")
+            print("Crisis concluded.")
+            return world
+        if command == "REJECT ENDING" or command.startswith("REJECT ENDING "):
+            query = user_text[len("REJECT ENDING") :].strip() or "latest"
+            decision = reject_ending_offer(
+                world,
+                player_entity_id=player_id,
+                offer_query=query,
+            )
+            if decision.errors:
+                print()
+                print("REJECT ENDING FAILED")
+                for error in decision.errors:
+                    print(f"- {error}")
+                print()
+                continue
+            world = decision.world_state
+            pending_plan = None
+            recorder.update_world_state(world, rendered_log_entry=decision.summary)
+            debug_path = recorder.save()
+            playable_path = _save_playable(world, player_id, save_dir)
+            print()
+            print(decision.summary)
+            print(f"Saved playable session: {playable_path}")
+            print(f"Saved debug session: {debug_path}")
+            print("Continue with ASK, PLAN, ACTION, END, SAVE, HELP, or QUIT.\n")
             continue
         if command.startswith("BACKCHANNEL "):
             backchannel_text = user_text[len("BACKCHANNEL ") :].strip()
@@ -173,14 +325,40 @@ def _input_loop(
                 world=world,
                 player_id=player_id,
                 backchannel_text=backchannel_text,
+                scenario=scenario,
                 orchestrator=orchestrator,
                 recorder=recorder,
+                save_dir=save_dir,
+                debug_mode=debug_mode,
             )
             pending_plan = None
             continue
         if command == "SAVE":
-            path = recorder.save()
-            print(f"Saved session: {path}")
+            debug_path = recorder.save()
+            playable_path = _save_playable(
+                world,
+                player_id,
+                save_dir,
+                pending_plan=pending_plan,
+            )
+            print(f"Saved playable session: {playable_path}")
+            print(f"Saved debug session: {debug_path}")
+            continue
+        if command.startswith("EVENT "):
+            event_text = user_text[len("EVENT ") :].strip()
+            world = _commit_event_choice(
+                world=world,
+                player_id=player_id,
+                event_text=event_text,
+                scenario=scenario,
+                orchestrator=orchestrator,
+                recorder=recorder,
+                save_dir=save_dir,
+                debug_mode=debug_mode,
+            )
+            pending_plan = None
+            if _maybe_end_at_max_turn(world, max_turns, recorder, save_dir, player_id):
+                return world
             continue
         if command == "COMMIT":
             if pending_plan is None:
@@ -198,11 +376,12 @@ def _input_loop(
                 scenario=scenario,
                 orchestrator=orchestrator,
                 recorder=recorder,
+                save_dir=save_dir,
                 debug_mode=debug_mode,
                 precompiled_player_compilation=pending_plan.compilation,
             )
             pending_plan = None
-            if _maybe_end_at_max_turn(world, max_turns, recorder):
+            if _maybe_end_at_max_turn(world, max_turns, recorder, save_dir, player_id):
                 return world
             continue
         if command == "END":
@@ -214,10 +393,11 @@ def _input_loop(
                 scenario=scenario,
                 orchestrator=orchestrator,
                 recorder=recorder,
+                save_dir=save_dir,
                 debug_mode=debug_mode,
             )
             pending_plan = None
-            if _maybe_end_at_max_turn(world, max_turns, recorder):
+            if _maybe_end_at_max_turn(world, max_turns, recorder, save_dir, player_id):
                 return world
             continue
         if command == "PLAN" or command.startswith("PLAN "):
@@ -233,6 +413,7 @@ def _input_loop(
                 llm_client=llm_client,
                 orchestrator=orchestrator,
                 recorder=recorder,
+                save_dir=save_dir,
             )
             continue
         if command.startswith("ACTION"):
@@ -248,10 +429,11 @@ def _input_loop(
                 scenario=scenario,
                 orchestrator=orchestrator,
                 recorder=recorder,
+                save_dir=save_dir,
                 debug_mode=debug_mode,
             )
             pending_plan = None
-            if _maybe_end_at_max_turn(world, max_turns, recorder):
+            if _maybe_end_at_max_turn(world, max_turns, recorder, save_dir, player_id):
                 return world
             continue
 
@@ -275,6 +457,7 @@ def _resolve_turn(
     scenario: Scenario,
     orchestrator: TurnOrchestrator,
     recorder: DebugSessionRecorder,
+    save_dir: Path,
     debug_mode: bool,
     precompiled_player_compilation: GamemasterCompilation | None = None,
 ) -> WorldStateV2:
@@ -293,16 +476,24 @@ def _resolve_turn(
 
     next_world = result.world_state
     recorder.append_turn(result.debug_transcript, next_world)
-    path = recorder.save()
+    debug_path = recorder.save()
+    playable_path = _save_playable(next_world, player_id, save_dir)
     print()
     _print_turn_result(render_aftermath_report(result.aftermath_report))
     if debug_mode:
         print()
         _print_turn_result(result.debug_transcript.rendered_text)
     print()
-    _print_status(next_world, player_id, scenario.action_catalog)
-    print(f"Saved session: {path}")
-    print("Ask advisors, PLAN, ACTION, END, SAVE, HELP, or QUIT.\n")
+    _print_status(
+        next_world,
+        player_id,
+        scenario.action_catalog,
+        scenario.capabilities,
+        action_budget=orchestrator.action_budget,
+    )
+    print(f"Saved playable session: {playable_path}")
+    print(f"Saved debug session: {debug_path}")
+    print("Ask advisors, PLAN, ACTION, ENDING, END, SAVE, HELP, or QUIT.\n")
     return next_world
 
 
@@ -315,6 +506,7 @@ def _preview_plan(
     llm_client: LLMClient,
     orchestrator: TurnOrchestrator,
     recorder: DebugSessionRecorder,
+    save_dir: Path,
 ) -> PlayerPlanPreview | None:
     call_start = _llm_call_count(llm_client)
     try:
@@ -324,6 +516,8 @@ def _preview_plan(
             player_intent=player_intent,
             gamemaster=orchestrator.gamemaster,
             action_catalog=scenario.action_catalog,
+            capabilities=scenario.capabilities,
+            scenario_events=scenario.scenario_events,
         )
     except Exception as exc:
         print(_format_runtime_error("Plan preview", exc))
@@ -332,6 +526,7 @@ def _preview_plan(
     rendered = render_player_plan_preview(
         preview,
         action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
     )
     recorder.append_plan_preview(
         turn=world.turn_number,
@@ -340,10 +535,17 @@ def _preview_plan(
         rendered_text=rendered,
         llm_calls=_llm_call_records(llm_client, start_index=call_start),
     )
-    path = recorder.save()
+    debug_path = recorder.save()
+    playable_path = _save_playable(
+        world,
+        player_id,
+        save_dir,
+        pending_plan=preview if preview.is_committable else None,
+    )
     print()
     print(rendered)
-    print(f"Saved session: {path}")
+    print(f"Saved playable session: {playable_path}")
+    print(f"Saved debug session: {debug_path}")
     if not preview.is_committable:
         print("Use PLAN <text> to try again, ACTION <text> to resolve immediately, or HELP.\n")
         return None
@@ -356,11 +558,7 @@ def _plan_matches_world(
     world: WorldStateV2,
     player_id: str,
 ) -> bool:
-    return (
-        preview.player_entity_id == player_id
-        and preview.turn_number == world.turn_number
-        and preview.is_committable
-    )
+    return pending_plan_matches_world(preview, world, player_id)
 
 
 def _answer_dialogue(
@@ -398,8 +596,11 @@ def _send_backchannel_message(
     world: WorldStateV2,
     player_id: str,
     backchannel_text: str,
+    scenario: Scenario,
     orchestrator: TurnOrchestrator,
     recorder: DebugSessionRecorder,
+    save_dir: Path,
+    debug_mode: bool,
 ) -> WorldStateV2:
     pieces = backchannel_text.split(maxsplit=1)
     if len(pieces) < 2:
@@ -412,37 +613,165 @@ def _send_backchannel_message(
         player_entity_id=player_id,
         target_query=target_query,
     )
-    if target_id is None:
-        print(f"Backchannel target not found or ambiguous: {target_query}\n")
-        return world
+
+    call_start = _llm_call_count(orchestrator.llm_client)
+    if target_id is not None:
+        preparation = prepare_backchannel_message(
+            world,
+            player_entity_id=player_id,
+            target_entity_id=target_id,
+            message_text=message_text,
+            action_catalog=scenario.action_catalog,
+            capabilities=scenario.capabilities,
+            llm_client=orchestrator.llm_client,
+        )
+        if not preparation.accepted:
+            print()
+            print("BACKCHANNEL FAILED")
+            for error in preparation.errors:
+                print(f"- {error}")
+            print()
+            return world
+        if preparation.formal:
+            preparation_llm_calls = _llm_call_records(
+                orchestrator.llm_client,
+                start_index=call_start,
+            )
+            if preparation_llm_calls:
+                recorder.append_llm_task(
+                    turn=world.turn_number,
+                    label=preparation_llm_calls[0].request.label,
+                    llm_calls=preparation_llm_calls,
+                    rendered_text=(
+                        f"[turn {world.turn_number} llm] "
+                        f"{preparation_llm_calls[0].request.label}"
+                    ),
+                )
+            assert preparation.compilation is not None
+            print()
+            print("BACKCHANNEL FORMAL ACTION")
+            print(f"Sent to {target_id}: {preparation.message_text}")
+            print("Resolving through the turn pipeline.\n")
+            return _resolve_turn(
+                world=world,
+                player_id=player_id,
+                player_intent=f"direct backchannel message to {target_id}",
+                player_message="",
+                scenario=scenario,
+                orchestrator=orchestrator,
+                recorder=recorder,
+                save_dir=save_dir,
+                debug_mode=debug_mode,
+                precompiled_player_compilation=preparation.compilation,
+            )
 
     result = send_backchannel_message(
         world,
         player_entity_id=player_id,
-        target_entity_id=target_id,
+        target_entity_id=target_id or "",
+        target_query=target_query,
         message_text=message_text,
+        action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
+        llm_client=orchestrator.llm_client,
         info_channel=orchestrator.info_channel,
     )
+    llm_calls = _llm_call_records(orchestrator.llm_client, start_index=call_start)
+    if llm_calls:
+        recorder.append_llm_task(
+            turn=world.turn_number,
+            label=llm_calls[0].request.label,
+            llm_calls=llm_calls,
+            rendered_text=(
+                f"[turn {world.turn_number} llm] "
+                f"{llm_calls[0].request.label}"
+            ),
+        )
     rendered = render_backchannel_direct_message_result(result)
     print()
     print(rendered)
     next_world = result.world_state
     recorder.update_world_state(next_world, rendered_log_entry=rendered)
-    path = recorder.save()
-    print(f"Saved session: {path}")
-    print("Ask advisors, PLAN, ACTION, use BACKCHANNELS, END, SAVE, HELP, or QUIT.\n")
+    debug_path = recorder.save()
+    playable_path = _save_playable(next_world, player_id, save_dir)
+    print(f"Saved playable session: {playable_path}")
+    print(f"Saved debug session: {debug_path}")
+    print("Ask advisors, PLAN, ACTION, use BACKCHANNELS, ENDING, END, SAVE, HELP, or QUIT.\n")
     return next_world
+
+
+def _commit_event_choice(
+    *,
+    world: WorldStateV2,
+    player_id: str,
+    event_text: str,
+    scenario: Scenario,
+    orchestrator: TurnOrchestrator,
+    recorder: DebugSessionRecorder,
+    save_dir: Path,
+    debug_mode: bool,
+) -> WorldStateV2:
+    pieces = event_text.split(maxsplit=1)
+    if len(pieces) < 2:
+        print("EVENT needs a choice and option, for example:")
+        print("EVENT latest private_probe\n")
+        return world
+    choice_query, option_query = pieces
+    package, errors = build_event_choice_action(
+        world,
+        player_entity_id=player_id,
+        choice_query=choice_query,
+        option_query=option_query,
+    )
+    if package is None:
+        print()
+        print("EVENT CHOICE FAILED")
+        for error in errors:
+            print(f"- {error}")
+        print()
+        return world
+    compilation = GamemasterCompilation(
+        action_packages=[package],
+        action_package=package,
+        compiled_intents=[package.intent_summary],
+        notes=[
+            "Compiled pending event choice through its configured scenario capability."
+        ],
+        action_budget=orchestrator.action_budget,
+        hard_action_limit=orchestrator.hard_action_limit,
+    )
+    print()
+    print("EVENT CHOICE FORMAL ACTION")
+    print(f"Choice: {choice_query} -> {option_query}")
+    print("Resolving through the turn pipeline.\n")
+    return _resolve_turn(
+        world=world,
+        player_id=player_id,
+        player_intent=f"event choice {choice_query} {option_query}",
+        player_message="",
+        scenario=scenario,
+        orchestrator=orchestrator,
+        recorder=recorder,
+        save_dir=save_dir,
+        debug_mode=debug_mode,
+        precompiled_player_compilation=compilation,
+    )
 
 
 def _print_status(
     world: WorldStateV2,
     player_id: str,
     action_catalog: list[ActionDefinition],
+    capabilities: list[ScenarioCapability],
+    *,
+    action_budget: int = NORMAL_ACTION_BUDGET,
 ) -> None:
     briefing = build_turn_briefing(
         world,
         player_entity_id=player_id,
         action_catalog=action_catalog,
+        capabilities=capabilities,
+        action_budget=action_budget,
     )
     print(render_turn_briefing(briefing))
     player = world.actors[player_id]
@@ -457,7 +786,12 @@ def _print_status(
     print()
 
 
-def _print_advisors(world: WorldStateV2, player_id: str) -> None:
+def _print_advisors(
+    world: WorldStateV2,
+    player_id: str,
+    *,
+    debug_mode: bool = False,
+) -> None:
     council = world.advisor_councils.get(player_id)
     if council is None:
         print("No persistent advisor council is initialized.\n")
@@ -467,25 +801,41 @@ def _print_advisors(world: WorldStateV2, player_id: str) -> None:
     for advisor in council.advisors.values():
         trusted_channel = _trusted_channel(advisor.trust_channels)
         belief = next(iter(advisor.beliefs.values()), None)
-        print(
-            f"- {advisor.name}: trust {advisor.trust_player:.0%}, "
-            f"urgency {advisor.urgency:.0%}, paranoia {advisor.paranoia:.0%}, "
-            f"trusted channel {trusted_channel}"
-        )
+        if debug_mode:
+            print(
+                f"- {advisor.name}: trust {advisor.trust_player:.0%}, "
+                f"urgency {advisor.urgency:.0%}, paranoia {advisor.paranoia:.0%}, "
+                f"trusted channel {trusted_channel}"
+            )
+        else:
+            print(
+                f"- {advisor.name}: {_trust_read(advisor.trust_player)} trust, "
+                f"{_pressure_read(advisor.urgency)} urgency, "
+                f"{_pressure_read(advisor.paranoia)} caution, "
+                f"trusts {trusted_channel}"
+            )
         if belief is not None:
             print(f"  Belief: {belief.summary}")
+        if advisor.recent_recommendations:
+            print(f"  Recent recommendation: {advisor.recent_recommendations[-1]}")
+        if advisor.recent_embarrassments:
+            print(f"  Concern: {advisor.recent_embarrassments[-1]}")
     print()
 
 
-def _print_advisor_response(response: AdvisorResponse) -> None:
+def _print_advisor_response(response: AdvisorCouncilResponse) -> None:
     print()
     print("ADVISORS")
     print(response.answer)
+    if response.council_summary:
+        print(f"Council: {response.council_summary}")
     for view in response.advisor_views:
         print(f"- {view.advisor_name}: {view.stance}. {view.reasoning}")
     for warning in response.risk_warnings:
         print(f"! {warning}")
-    if response.suggested_action_ids:
+    if response.suggested_capability_ids:
+        print(f"Suggested moves: {', '.join(response.suggested_capability_ids)}")
+    elif response.suggested_action_ids:
         print(f"Suggested actions: {', '.join(response.suggested_action_ids)}")
     if response.visible_context_limits:
         print(f"Limits: {' | '.join(response.visible_context_limits)}")
@@ -500,32 +850,34 @@ def _maybe_end_at_max_turn(
     world: WorldStateV2,
     max_turns: int,
     recorder: DebugSessionRecorder,
+    save_dir: Path,
+    player_id: str,
 ) -> bool:
     if max_turns <= 0 or world.turn_number <= max_turns:
         return False
-    path = recorder.save()
-    print(f"Reached max turn limit ({max_turns}). Saved session: {path}")
+    debug_path = recorder.save()
+    playable_path = _save_playable(world, player_id, save_dir)
+    print(f"Reached max turn limit ({max_turns}). Saved playable session: {playable_path}")
+    print(f"Saved debug session: {debug_path}")
     return True
 
 
-def _build_llm_client(mode: str) -> LLMClient:
-    if mode == "llama":
-        settings = load_settings().llama_cpp
-        client = LlamaCppServerClient(settings)
-        try:
-            print(f"Starting local LLM server: {settings.server_model}")
-            print(f"Endpoint: {settings.base_url}")
-            client.lease.ensure_running()
-            if client.lease.log_path is not None:
-                print(f"llama-server log: {client.lease.log_path}")
-            else:
-                print("Connected to existing llama-server endpoint.")
-            print()
-        except Exception:
-            client.close()
-            raise
-        return client
-    return ScriptedLLMClient()
+def _build_llm_client() -> LLMClient:
+    settings = load_settings().llama_cpp
+    client = LlamaCppServerClient(settings)
+    try:
+        print(f"Starting local LLM server: {settings.server_model}")
+        print(f"Endpoint: {settings.base_url}")
+        client.lease.ensure_running()
+        if client.lease.log_path is not None:
+            print(f"llama-server log: {client.lease.log_path}")
+        else:
+            print("Connected to existing llama-server endpoint.")
+        print()
+    except Exception:
+        client.close()
+        raise
+    return client
 
 
 def _close_client(llm_client: LLMClient) -> None:
@@ -582,19 +934,62 @@ def _trusted_channel(channels: dict[str, float]) -> str:
     return channel.replace("_", " ")
 
 
+def _trust_read(value: float) -> str:
+    if value >= 0.72:
+        return "strong"
+    if value >= 0.55:
+        return "steady"
+    if value >= 0.38:
+        return "fragile"
+    return "strained"
+
+
+def _pressure_read(value: float) -> str:
+    if value >= 0.75:
+        return "high"
+    if value >= 0.55:
+        return "rising"
+    if value >= 0.35:
+        return "guarded"
+    return "low"
+
+
 def _format_float_map(values: dict[str, float]) -> str:
     return ", ".join(f"{key}={value:.2f}" for key, value in sorted(values.items()))
 
 
+def _save_playable(
+    world: WorldStateV2,
+    player_id: str,
+    save_dir: Path,
+    *,
+    pending_plan: PlayerPlanPreview | None = None,
+) -> Path:
+    return save_playable_session(
+        world_state=world,
+        player_entity_id=player_id,
+        output_dir=save_dir,
+        pending_plan=pending_plan,
+    )
+
+
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the Crisis Room game.")
-    parser.add_argument(
-        "--llm",
-        choices=["scripted", "llama"],
-        default="llama",
-        help="llama starts/uses the managed local llama.cpp server; scripted is an offline fallback",
-    )
     parser.add_argument("--seed", type=int, default=7, help="deterministic scenario seed")
+    parser.add_argument(
+        "--scenario",
+        default=DEFAULT_SCENARIO_ID,
+        help=(
+            "built-in scenario ID/alias or path to a Scenario JSON file "
+            f"(default: {DEFAULT_SCENARIO_ID})"
+        ),
+    )
+    parser.add_argument(
+        "--scenario-dir",
+        type=Path,
+        default=None,
+        help="directory of launch-time Scenario JSON files",
+    )
     parser.add_argument(
         "--max-turns",
         type=int,
@@ -602,10 +997,34 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help="stop automatically after this turn number; use 0 for unlimited",
     )
     parser.add_argument(
+        "--action-budget",
+        type=int,
+        default=NORMAL_ACTION_BUDGET,
+        help="normal number of formal player actions per turn",
+    )
+    parser.add_argument(
+        "--hard-action-limit",
+        type=int,
+        default=HARD_ACTION_BUDGET,
+        help="hard maximum compiler candidates before a player turn is rejected",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("output/debug_sessions"),
-        help="directory for saved session JSON files",
+        help="directory for debug session JSON files",
+    )
+    parser.add_argument(
+        "--save-dir",
+        type=Path,
+        default=Path("saves"),
+        help="directory for playable save JSON files",
+    )
+    parser.add_argument(
+        "--load-save",
+        type=Path,
+        default=None,
+        help="load a playable save JSON file before starting",
     )
     parser.add_argument(
         "--demo",

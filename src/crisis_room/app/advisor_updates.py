@@ -2,9 +2,30 @@ from __future__ import annotations
 
 from crisis_room.agents.base import AgentOutput
 from crisis_room.agents.info_channel import RoutingResult
-from crisis_room.engine.actions import ActionCategory, ActionDefinition, ActionPackage
+from crisis_room.config.gameplay import (
+    ADVISOR_BASE_CHANNEL_TRUST,
+    ADVISOR_BELIEF_CONFIDENCE_STEP,
+    ADVISOR_DELTA_CLAMP,
+    ADVISOR_DELTA_ROUND_DIGITS,
+    ADVISOR_METRIC_CHANGE_THRESHOLD,
+    ADVISOR_SCALE_CLAMP,
+    ADVISOR_SUMMARY_CHANGE_THRESHOLD,
+    ADVISOR_SUMMARY_LIMIT,
+    ADVISOR_VALUE_CHANGE_THRESHOLD,
+    MAX_ADVISOR_RECENT_NOTES,
+    MAX_ADVISOR_UPDATE_HISTORY,
+    NUMERIC_ROUND_DIGITS,
+)
+from crisis_room.engine.actions import (
+    ActionCategory,
+    ActionDefinition,
+    ActionPackage,
+    ActionResolver,
+    ScenarioCapability,
+)
 from crisis_room.engine.adjudication import DeterministicTurnResult
 from crisis_room.engine.clocks import clamp
+from crisis_room.llm.task_contracts import AdvisorCouncilResponse, AdvisorDeltaProposal
 from crisis_room.state.advisors import (
     AdvisorBelief,
     AdvisorCouncilState,
@@ -16,18 +37,16 @@ from crisis_room.state.signals import SignalChannel
 from crisis_room.state.world import WorldStateV2
 
 
-MAX_RECENT_NOTES = 6
-MAX_UPDATE_HISTORY = 30
-
-
 def update_advisor_council(
     world_state: WorldStateV2,
     *,
     before_world_state: WorldStateV2,
     player_entity_id: str,
     action_catalog: list[ActionDefinition],
+    capabilities: list[ScenarioCapability] | None = None,
     deterministic_result: DeterministicTurnResult,
     agent_outputs: dict[str, AgentOutput] | None = None,
+    council_response: AdvisorCouncilResponse | None = None,
     event_output: AgentOutput | None = None,
     final_routing_result: RoutingResult | None = None,
 ) -> AdvisorCouncilUpdate | None:
@@ -42,13 +61,14 @@ def update_advisor_council(
         turn_number=world_state.turn_number,
         player_entity_id=player_entity_id,
     )
-    catalog = {definition.action_id: definition for definition in action_catalog}
+    resolver = ActionResolver(action_catalog, capabilities)
 
-    _react_to_player_actions(builder, deterministic_result, catalog, player_entity_id)
-    _react_to_rejections(builder, deterministic_result, catalog, player_entity_id)
+    _react_to_player_actions(builder, deterministic_result, resolver, player_entity_id)
+    _react_to_rejections(builder, deterministic_result, resolver, player_entity_id)
     _react_to_metric_changes(builder, before_world_state, world_state)
-    _react_to_npc_actions(builder, deterministic_result, catalog, player_entity_id)
+    _react_to_npc_actions(builder, deterministic_result, resolver, player_entity_id)
     _react_to_agent_outputs(builder, agent_outputs or {}, player_entity_id)
+    _react_to_council_response(builder, council_response)
     _react_to_event_pressure(builder, event_output, player_entity_id)
     _react_to_routing_noise(builder, final_routing_result, player_entity_id)
 
@@ -58,9 +78,9 @@ def update_advisor_council(
 
     _apply_update(council, update)
     world_state.advisor_update_history.append(update)
-    if len(world_state.advisor_update_history) > MAX_UPDATE_HISTORY:
+    if len(world_state.advisor_update_history) > MAX_ADVISOR_UPDATE_HISTORY:
         world_state.advisor_update_history = world_state.advisor_update_history[
-            -MAX_UPDATE_HISTORY:
+            -MAX_ADVISOR_UPDATE_HISTORY:
         ]
     return update
 
@@ -141,14 +161,14 @@ class _AdvisorUpdateBuilder:
             player_entity_id=self.player_entity_id,
             turn_number=self.turn_number,
             deltas=deltas,
-            summary=summaries[:5],
+            summary=summaries[:ADVISOR_SUMMARY_LIMIT],
         )
 
 
 def _react_to_player_actions(
     builder: _AdvisorUpdateBuilder,
     deterministic_result: DeterministicTurnResult,
-    catalog: dict[str, ActionDefinition],
+    resolver: ActionResolver,
     player_entity_id: str,
 ) -> None:
     packages = _unique_packages(
@@ -160,7 +180,7 @@ def _react_to_player_actions(
     for package in packages:
         if package.actor_id != player_entity_id:
             continue
-        definition = catalog.get(package.action_id)
+        definition = _resolve_definition(resolver, package)
         if definition is not None:
             _react_to_player_action(builder, package, definition)
 
@@ -256,7 +276,8 @@ def _react_to_player_action(
             memory=f"The public line hardened around {title}.",
         )
 
-    if package.action_id == "announce_quarantine":
+    capability_id = package.mechanical_id
+    if capability_id == "cuba_announce_naval_quarantine":
         builder.bump(
             "state",
             reason="quarantine preserved a bounded pressure path",
@@ -270,7 +291,7 @@ def _react_to_player_action(
             confidence=0.015,
             recommendation="Use OAS, UN, and careful language to distinguish quarantine from blockade.",
         )
-    elif package.action_id == "private_kremlin_backchannel":
+    elif capability_id == "cuba_open_kremlin_channel":
         builder.bump(
             "state",
             reason="private Kremlin channel opened",
@@ -282,7 +303,7 @@ def _react_to_player_action(
             belief_delta=0.04,
             recommendation="Use the channel for concrete reciprocal terms before public pressure peaks.",
         )
-    elif package.action_id == "secret_jupiter_trade":
+    elif capability_id == "cuba_secret_jupiter_trade":
         builder.bump(
             "political",
             reason="secret Jupiter trade creates leak exposure",
@@ -296,7 +317,7 @@ def _react_to_player_action(
             trust=-0.015,
             paranoia=0.02,
         )
-    elif package.action_id == "prepare_air_strike":
+    elif capability_id == "cuba_prepare_air_strike":
         builder.bump(
             "defense",
             reason="air strike option prepared",
@@ -311,7 +332,7 @@ def _react_to_player_action(
             urgency=0.04,
             paranoia=0.03,
         )
-    elif package.action_id == "offer_non_invasion_pledge":
+    elif capability_id == "cuba_offer_non_invasion_pledge":
         builder.bump(
             "state",
             reason="non-invasion pledge supports a settlement path",
@@ -331,14 +352,14 @@ def _react_to_player_action(
 def _react_to_rejections(
     builder: _AdvisorUpdateBuilder,
     deterministic_result: DeterministicTurnResult,
-    catalog: dict[str, ActionDefinition],
+    resolver: ActionResolver,
     player_entity_id: str,
 ) -> None:
     for package in deterministic_result.rejected_actions:
         if package.actor_id != player_entity_id:
             continue
-        definition = catalog.get(package.action_id)
-        title = definition.title if definition is not None else package.action_id
+        definition = _resolve_definition(resolver, package)
+        title = definition.title if definition is not None else package.mechanical_id
         validation = deterministic_result.validation_results.get(package.package_id)
         reason = "; ".join(validation.errors) if validation is not None else "failed validation"
         for advisor_id in builder.council.advisors:
@@ -365,7 +386,7 @@ def _react_to_metric_changes(
     backchannel = _change(before.hidden_clocks, after.hidden_clocks, "backchannel_viability")
 
     public_pressure = alarm + anxiety
-    if abs(public_pressure) >= 0.025:
+    if abs(public_pressure) >= ADVISOR_METRIC_CHANGE_THRESHOLD:
         builder.bump(
             "political",
             reason="public pressure changed",
@@ -381,7 +402,7 @@ def _react_to_metric_changes(
             urgency=_scaled(public_pressure, 0.12),
         )
 
-    if abs(allied) >= 0.025:
+    if abs(allied) >= ADVISOR_METRIC_CHANGE_THRESHOLD:
         builder.bump(
             "state",
             reason="allied confidence changed",
@@ -400,7 +421,7 @@ def _react_to_metric_changes(
         )
 
     accident_pressure = escalation + command + quarantine
-    if abs(accident_pressure) >= 0.025:
+    if abs(accident_pressure) >= ADVISOR_METRIC_CHANGE_THRESHOLD:
         for advisor_id in ("defense", "intelligence"):
             builder.bump(
                 advisor_id,
@@ -416,7 +437,7 @@ def _react_to_metric_changes(
             paranoia=_scaled(accident_pressure, 0.08),
         )
 
-    if abs(backchannel) >= 0.025:
+    if abs(backchannel) >= ADVISOR_METRIC_CHANGE_THRESHOLD:
         builder.bump(
             "state",
             reason="backchannel viability changed",
@@ -439,15 +460,16 @@ def _react_to_metric_changes(
 def _react_to_npc_actions(
     builder: _AdvisorUpdateBuilder,
     deterministic_result: DeterministicTurnResult,
-    catalog: dict[str, ActionDefinition],
+    resolver: ActionResolver,
     player_entity_id: str,
 ) -> None:
     for package in deterministic_result.accepted_actions:
         if package.actor_id == player_entity_id:
             continue
-        definition = catalog.get(package.action_id)
-        title = definition.title if definition is not None else package.action_id
-        if package.action_id == "soviet_probe_compromise":
+        definition = _resolve_definition(resolver, package)
+        title = definition.title if definition is not None else package.mechanical_id
+        capability_id = package.mechanical_id
+        if capability_id == "soviet_compromise_probe":
             builder.bump(
                 "state",
                 reason="Soviet probe suggests an off-ramp remains",
@@ -459,7 +481,7 @@ def _react_to_npc_actions(
                 belief_delta=0.025,
                 memory="Moscow tested compromise terms rather than only public defiance.",
             )
-        elif package.action_id == "soviet_public_defiance":
+        elif capability_id == "soviet_defiance_statement":
             builder.bump(
                 "political",
                 reason="Soviet public defiance hardened public stakes",
@@ -468,7 +490,7 @@ def _react_to_npc_actions(
             )
             builder.bump("defense", reason="Soviet public defiance", urgency=0.025)
             builder.bump("state", reason="Soviet public defiance", trust=-0.015)
-        elif package.action_id == "cuban_air_defense_alert":
+        elif capability_id == "cuba_air_defense_alert":
             builder.bump(
                 "intelligence",
                 reason="Cuban air defense alert raises local control concern",
@@ -484,7 +506,7 @@ def _react_to_npc_actions(
                 urgency=0.03,
                 paranoia=0.015,
             )
-        elif package.action_id == "nato_reassurance_request":
+        elif capability_id == "nato_reassurance_pressure":
             for advisor_id in ("state", "political", "legal_un"):
                 builder.bump(
                     advisor_id,
@@ -517,6 +539,67 @@ def _react_to_agent_outputs(
                 paranoia=0.01,
                 memory=f"{entity_id} produced no valid move: {output.debug_notes[0]}",
             )
+
+
+def _react_to_council_response(
+    builder: _AdvisorUpdateBuilder,
+    council_response: AdvisorCouncilResponse | None,
+) -> None:
+    if council_response is None:
+        return
+    for proposal in council_response.proposed_advisor_deltas:
+        _apply_delta_proposal(builder, proposal)
+
+
+def _apply_delta_proposal(
+    builder: _AdvisorUpdateBuilder,
+    proposal: AdvisorDeltaProposal,
+) -> None:
+    if proposal.advisor_id not in builder.council.advisors:
+        return
+    reason = (
+        "; ".join(proposal.reasons)
+        if proposal.reasons
+        else "advisor council response proposed a bounded update"
+    )
+    builder.bump(
+        proposal.advisor_id,
+        reason=reason,
+        trust=proposal.trust_player_delta,
+        paranoia=proposal.paranoia_delta,
+        urgency=proposal.urgency_delta,
+        confidence=proposal.institutional_confidence_delta,
+    )
+    for channel, delta in proposal.trust_channel_deltas.items():
+        builder.bump(
+            proposal.advisor_id,
+            reason=reason,
+            channel=channel,
+            channel_trust=delta,
+        )
+    for topic, delta in proposal.belief_value_deltas.items():
+        builder.bump(
+            proposal.advisor_id,
+            reason=reason,
+            belief_topic=topic,
+            belief_delta=delta,
+            belief_summary=proposal.belief_summaries.get(topic, ""),
+        )
+    for topic, summary in proposal.belief_summaries.items():
+        if topic not in proposal.belief_value_deltas:
+            builder.bump(
+                proposal.advisor_id,
+                reason=reason,
+                belief_topic=topic,
+                belief_delta=0.0,
+                belief_summary=summary,
+            )
+    for note in proposal.memory_notes:
+        builder.bump(proposal.advisor_id, reason=reason, memory=note)
+    for note in proposal.recommendation_notes:
+        builder.bump(proposal.advisor_id, reason=reason, recommendation=note)
+    for note in proposal.embarrassment_notes:
+        builder.bump(proposal.advisor_id, reason=reason, embarrassment=note)
 
 
 def _react_to_event_pressure(
@@ -604,13 +687,16 @@ def _apply_update(
         )
         for channel, channel_delta in delta.trust_channel_deltas.items():
             advisor.trust_channels[channel] = _add_clamped(
-                advisor.trust_channels.get(channel, 0.5),
+                advisor.trust_channels.get(channel, ADVISOR_BASE_CHANNEL_TRUST),
                 channel_delta,
             )
         for topic, belief_delta in delta.belief_value_deltas.items():
             belief = advisor.beliefs.get(topic) or AdvisorBelief(topic=topic)
             belief.value = _add_clamped(belief.value, belief_delta)
-            belief.confidence = _add_clamped(belief.confidence, 0.025)
+            belief.confidence = _add_clamped(
+                belief.confidence,
+                ADVISOR_BELIEF_CONFIDENCE_STEP,
+            )
             belief.last_updated_turn = update.turn_number
             summary = delta.belief_summaries.get(topic)
             if summary:
@@ -642,12 +728,20 @@ def _unique_packages(packages: list[ActionPackage]) -> list[ActionPackage]:
     return unique
 
 
+def _resolve_definition(
+    resolver: ActionResolver,
+    package: ActionPackage,
+) -> ActionDefinition | None:
+    definition, errors = resolver.resolve_package(package)
+    return None if errors else definition
+
+
 def _change(before: dict[str, float], after: dict[str, float], key: str) -> float:
     return float(after.get(key, 0.0)) - float(before.get(key, 0.0))
 
 
 def _scaled(value: float, scale: float) -> float:
-    return max(-0.08, min(0.08, value * scale))
+    return max(-ADVISOR_SCALE_CLAMP, min(ADVISOR_SCALE_CLAMP, value * scale))
 
 
 def _direction_note(label: str, delta: float) -> str:
@@ -673,11 +767,14 @@ def _clamped_delta(delta: AdvisorStateDelta) -> AdvisorStateDelta:
 
 
 def _clamp_delta(value: float) -> float:
-    return round(max(-0.12, min(0.12, value)), 4)
+    return round(
+        max(-ADVISOR_DELTA_CLAMP, min(ADVISOR_DELTA_CLAMP, value)),
+        ADVISOR_DELTA_ROUND_DIGITS,
+    )
 
 
 def _add_clamped(value: float, delta: float) -> float:
-    return round(clamp(float(value) + float(delta)), 10)
+    return round(clamp(float(value) + float(delta)), NUMERIC_ROUND_DIGITS)
 
 
 def _delta_has_content(delta: AdvisorStateDelta) -> bool:
@@ -690,7 +787,7 @@ def _delta_has_content(delta: AdvisorStateDelta) -> bool:
         *delta.belief_value_deltas.values(),
     ]
     return (
-        any(abs(value) >= 0.0001 for value in numeric)
+        any(abs(value) >= ADVISOR_VALUE_CHANGE_THRESHOLD for value in numeric)
         or bool(delta.memory_notes)
         or bool(delta.recommendation_notes)
         or bool(delta.embarrassment_notes)
@@ -699,13 +796,13 @@ def _delta_has_content(delta: AdvisorStateDelta) -> bool:
 
 def _delta_summary(advisor: AdvisorState, delta: AdvisorStateDelta) -> str:
     pieces: list[str] = []
-    if abs(delta.trust_player_delta) >= 0.015:
+    if abs(delta.trust_player_delta) >= ADVISOR_SUMMARY_CHANGE_THRESHOLD:
         pieces.append(_moved("trust", delta.trust_player_delta))
-    if abs(delta.urgency_delta) >= 0.015:
+    if abs(delta.urgency_delta) >= ADVISOR_SUMMARY_CHANGE_THRESHOLD:
         pieces.append(_moved("urgency", delta.urgency_delta))
-    if abs(delta.paranoia_delta) >= 0.015:
+    if abs(delta.paranoia_delta) >= ADVISOR_SUMMARY_CHANGE_THRESHOLD:
         pieces.append(_moved("paranoia", delta.paranoia_delta))
-    if abs(delta.institutional_confidence_delta) >= 0.015:
+    if abs(delta.institutional_confidence_delta) >= ADVISOR_SUMMARY_CHANGE_THRESHOLD:
         pieces.append(
             _moved("institutional confidence", delta.institutional_confidence_delta)
         )
@@ -727,14 +824,14 @@ def _merge_memory_summary(existing: str, notes: list[str]) -> str:
     pieces = [piece.strip() for piece in existing.split(" | ") if piece.strip()]
     for note in notes:
         _append_unique(pieces, note)
-    return " | ".join(pieces[-MAX_RECENT_NOTES:])
+    return " | ".join(pieces[-MAX_ADVISOR_RECENT_NOTES:])
 
 
 def _bounded_extend(existing: list[str], notes: list[str]) -> list[str]:
     values = list(existing)
     for note in notes:
         _append_unique(values, note)
-    return values[-MAX_RECENT_NOTES:]
+    return values[-MAX_ADVISOR_RECENT_NOTES:]
 
 
 def _append_unique(values: list[str], value: str) -> None:

@@ -24,6 +24,7 @@ class AgentOutput(BaseModel):
     perception_summary: str = ""
     internal_debate: list[str] = Field(default_factory=list)
     action_package: ActionPackage | None = None
+    public_timeline_delta: list[TimelineEntry] = Field(default_factory=list)
     emitted_signals: list[Signal] = Field(default_factory=list)
     raw_llm_outputs: list[dict[str, object]] = Field(default_factory=list)
     debug_notes: list[str] = Field(default_factory=list)

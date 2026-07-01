@@ -10,24 +10,36 @@ from crisis_room.agents.gamemaster import CatalogGamemasterCompiler, GamemasterC
 from crisis_room.agents.info_channel import PrototypeInfoChannel, RoutingResult
 from crisis_room.agents.international_community import InternationalCommunityAgent
 from crisis_room.app.advisor_updates import update_advisor_council
-from crisis_room.app.backchannels import update_backchannel_threads
+from crisis_room.app.backchannels import (
+    build_formal_backchannel_response_signals,
+    update_backchannel_threads,
+)
 from crisis_room.app.presentation import (
     TurnAftermathReport,
     TurnBriefing,
     build_turn_aftermath_report,
     build_turn_briefing,
 )
-from crisis_room.engine.actions import ActionDefinition, ActionPackage
+from crisis_room.config.gameplay import HARD_ACTION_BUDGET, NORMAL_ACTION_BUDGET
+from crisis_room.engine.actions import ActionDefinition, ActionPackage, ScenarioCapability
 from crisis_room.engine.adjudication import DeterministicEngineV2, DeterministicTurnResult
 from crisis_room.engine.batch_validation import (
     BatchValidationReport,
     build_batch_validation_report,
 )
 from crisis_room.llm.contracts import LLMCallRecord, LLMClient
-from crisis_room.llm.task_contracts import AdvisorResponse
+from crisis_room.llm.task_contracts import AdvisorCouncilResponse
+from crisis_room.llm.task_contracts import EventCandidate
+from crisis_room.scenario.endings import (
+    EndingEvaluation,
+    ScenarioEndingDefinition,
+    evaluate_ending_events,
+)
+from crisis_room.scenario.event_choices import update_event_choices_from_actions
 from crisis_room.scenario.events import (
     ScenarioEventDefinition,
     ScenarioEventResolution,
+    ScenarioEventSettings,
     resolve_scenario_events,
 )
 from crisis_room.state.advisors import AdvisorCouncilUpdate
@@ -44,7 +56,7 @@ class TurnDebugTranscript(BaseModel):
     player_message: str = ""
     player_intent: str = ""
     start_routing_result: RoutingResult
-    dialogue_response: AdvisorResponse | None = None
+    dialogue_response: AdvisorCouncilResponse | None = None
     player_compilation: GamemasterCompilation
     player_briefing: TurnBriefing | None = None
     aftermath_report: TurnAftermathReport | None = None
@@ -52,6 +64,7 @@ class TurnDebugTranscript(BaseModel):
     backchannel_update: BackchannelThreadUpdate | None = None
     batch_validation_report: BatchValidationReport | None = None
     scenario_event_result: ScenarioEventResolution | None = None
+    ending_result: EndingEvaluation | None = None
     agent_outputs: dict[str, AgentOutput] = Field(default_factory=dict)
     event_output: AgentOutput | None = None
     deterministic_result: DeterministicTurnResult
@@ -63,7 +76,7 @@ class TurnDebugTranscript(BaseModel):
 class OrchestratedTurnResult(BaseModel):
     world_state: WorldStateV2
     start_routing_result: RoutingResult
-    dialogue_response: AdvisorResponse | None = None
+    dialogue_response: AdvisorCouncilResponse | None = None
     player_compilation: GamemasterCompilation
     player_briefing: TurnBriefing
     aftermath_report: TurnAftermathReport
@@ -71,6 +84,7 @@ class OrchestratedTurnResult(BaseModel):
     backchannel_update: BackchannelThreadUpdate | None = None
     batch_validation_report: BatchValidationReport | None = None
     scenario_event_result: ScenarioEventResolution | None = None
+    ending_result: EndingEvaluation | None = None
     agent_outputs: dict[str, AgentOutput] = Field(default_factory=dict)
     event_output: AgentOutput | None = None
     deterministic_result: DeterministicTurnResult
@@ -85,17 +99,38 @@ class TurnOrchestrator:
         self,
         *,
         action_catalog: list[ActionDefinition],
+        capabilities: list[ScenarioCapability] | None = None,
         llm_client: LLMClient,
         scenario_events: list[ScenarioEventDefinition] | None = None,
+        scenario_endings: list[ScenarioEndingDefinition] | None = None,
+        event_settings: ScenarioEventSettings | None = None,
         info_channel: PrototypeInfoChannel | None = None,
+        action_budget: int = NORMAL_ACTION_BUDGET,
+        hard_action_limit: int = HARD_ACTION_BUDGET,
     ) -> None:
+        self.action_budget = action_budget
+        self.hard_action_limit = hard_action_limit
         self.action_catalog = action_catalog
+        self.capabilities = capabilities or []
         self.scenario_events = [event.model_copy(deep=True) for event in scenario_events or []]
+        self.scenario_endings = [
+            ending.model_copy(deep=True) for ending in scenario_endings or []
+        ]
+        self.event_settings = event_settings or ScenarioEventSettings()
         self.llm_client = llm_client
-        self.info_channel = info_channel or PrototypeInfoChannel()
-        self.engine = DeterministicEngineV2(action_catalog)
-        self.dialogue_engine = DialogueEngineAgent(action_catalog=action_catalog)
-        self.gamemaster = CatalogGamemasterCompiler(action_catalog, llm_client)
+        self.info_channel = info_channel or PrototypeInfoChannel(llm_client=llm_client)
+        self.engine = DeterministicEngineV2(action_catalog, self.capabilities)
+        self.dialogue_engine = DialogueEngineAgent(
+            action_catalog=action_catalog,
+            capabilities=self.capabilities,
+        )
+        self.gamemaster = CatalogGamemasterCompiler(
+            action_catalog,
+            llm_client,
+            self.capabilities,
+            action_budget=action_budget,
+            hard_action_limit=hard_action_limit,
+        )
         self.event_creator = EventCreatorAgent()
 
     def run_turn(
@@ -116,6 +151,8 @@ class TurnOrchestrator:
             working_world,
             player_entity_id=player_entity_id,
             action_catalog=self.action_catalog,
+            capabilities=self.capabilities,
+            action_budget=self.action_budget,
         )
 
         dialogue_response = None
@@ -148,43 +185,94 @@ class TurnOrchestrator:
             if output.action_package is not None:
                 action_packages.append(output.action_package)
 
-        event_output = self.event_creator.create_candidate(
-            working_world,
-            llm_client=self.llm_client,
-            scenario_notes=scenario_notes,
-        )
-        emitted_signals = [*agent_signals, *event_output.emitted_signals]
+        emitted_signals = [*agent_signals]
         batch_validation_report = build_batch_validation_report(
             working_world,
             action_packages,
             self.action_catalog,
             player_entity_id=player_entity_id,
+            capabilities=self.capabilities,
+            action_budget=self.action_budget,
         )
 
         deterministic_result = self.engine.resolve_actions(
             working_world,
             action_packages,
         )
-        scenario_event_result = resolve_scenario_events(
+        formal_backchannel_response_signals = build_formal_backchannel_response_signals(
             deterministic_result.world_state,
+            deterministic_result=deterministic_result,
+        )
+        final_routing_result = self.info_channel.route_signals(
+            deterministic_result.world_state,
+            [
+                *deterministic_result.emitted_signals,
+                *formal_backchannel_response_signals,
+                *emitted_signals,
+            ],
+        )
+        event_output = self.event_creator.create_candidate(
+            final_routing_result.world_state,
+            llm_client=self.llm_client,
+            scenario_notes=scenario_notes,
+            scenario_events=self.scenario_events,
+        )
+        for entry in event_output.public_timeline_delta:
+            final_routing_result.world_state.public_timeline.append(entry)
+        scenario_event_result = resolve_scenario_events(
+            final_routing_result.world_state,
             self.scenario_events,
             deterministic_result=deterministic_result,
             player_entity_id=player_entity_id,
             framing_summary=event_output.perception_summary,
+            event_settings=self.event_settings,
+            event_candidate=_event_candidate_from_output(event_output),
         )
-        final_routing_result = self.info_channel.route_signals(
-            scenario_event_result.world_state,
-            [
-                *deterministic_result.emitted_signals,
-                *emitted_signals,
-                *scenario_event_result.emitted_signals,
-            ],
+        if scenario_event_result.emitted_signals:
+            scenario_event_routing_result = self.info_channel.route_signals(
+                scenario_event_result.world_state,
+                scenario_event_result.emitted_signals,
+            )
+            final_routing_result = _merge_routing_results(
+                final_routing_result,
+                scenario_event_routing_result,
+            )
+            scenario_event_result = scenario_event_result.model_copy(
+                update={"world_state": final_routing_result.world_state}
+            )
+        else:
+            final_routing_result = final_routing_result.model_copy(
+                update={"world_state": scenario_event_result.world_state}
+            )
+        leak_event_result = resolve_scenario_events(
+            final_routing_result.world_state,
+            _leak_triggered_scenario_events(self.scenario_events),
+            deterministic_result=deterministic_result,
+            routing_result=final_routing_result,
+            player_entity_id=player_entity_id,
+            framing_summary=event_output.perception_summary,
         )
+        if leak_event_result.fired_events:
+            leak_event_routing_result = self.info_channel.route_signals(
+                leak_event_result.world_state,
+                leak_event_result.emitted_signals,
+            )
+            final_routing_result = _merge_routing_results(
+                final_routing_result,
+                leak_event_routing_result,
+            )
+            scenario_event_result = _merge_scenario_event_results(
+                scenario_event_result,
+                leak_event_result,
+                world_state=final_routing_result.world_state,
+            )
         next_world = final_routing_result.world_state
+        update_event_choices_from_actions(next_world, deterministic_result)
         backchannel_update = update_backchannel_threads(
             next_world,
             deterministic_result=deterministic_result,
             action_catalog=self.action_catalog,
+            capabilities=self.capabilities,
             player_entity_id=player_entity_id,
         )
         advisor_update = update_advisor_council(
@@ -192,21 +280,42 @@ class TurnOrchestrator:
             before_world_state=working_world,
             player_entity_id=player_entity_id,
             action_catalog=self.action_catalog,
+            capabilities=self.capabilities,
             deterministic_result=deterministic_result,
             agent_outputs=agent_outputs,
+            council_response=dialogue_response,
             event_output=event_output,
             final_routing_result=final_routing_result,
         )
+        ending_result = None
+        if self.scenario_endings:
+            ending_result = evaluate_ending_events(
+                next_world,
+                self.scenario_endings,
+                player_entity_id=player_entity_id,
+            )
+            next_world = ending_result.world_state
+            final_routing_result = final_routing_result.model_copy(
+                update={"world_state": next_world}
+            )
+            scenario_event_result = _merge_ending_result(
+                scenario_event_result,
+                ending_result,
+                world_state=next_world,
+            )
         aftermath_report = build_turn_aftermath_report(
             before_world_state=working_world,
             after_world_state=next_world,
             player_entity_id=player_entity_id,
             action_catalog=self.action_catalog,
+            capabilities=self.capabilities,
             deterministic_result=deterministic_result,
             agent_outputs=agent_outputs,
             advisor_update=advisor_update,
             batch_validation_report=batch_validation_report,
             scenario_event_result=scenario_event_result,
+            event_output=event_output,
+            action_budget=self.action_budget,
         )
         next_world.turn_number += 1
 
@@ -218,6 +327,7 @@ class TurnOrchestrator:
             agent_outputs=agent_outputs,
             event_output=event_output,
             scenario_event_result=scenario_event_result,
+            ending_result=ending_result,
             batch_validation_report=batch_validation_report,
             backchannel_update=backchannel_update,
             advisor_update=advisor_update,
@@ -241,6 +351,7 @@ class TurnOrchestrator:
             backchannel_update=backchannel_update,
             batch_validation_report=batch_validation_report,
             scenario_event_result=scenario_event_result,
+            ending_result=ending_result,
             agent_outputs=agent_outputs,
             event_output=event_output,
             deterministic_result=deterministic_result,
@@ -259,6 +370,7 @@ class TurnOrchestrator:
             backchannel_update=backchannel_update,
             batch_validation_report=batch_validation_report,
             scenario_event_result=scenario_event_result,
+            ending_result=ending_result,
             agent_outputs=agent_outputs,
             event_output=event_output,
             deterministic_result=deterministic_result,
@@ -293,7 +405,11 @@ class TurnOrchestrator:
             EntityType.ALLIED_FACTION,
             EntityType.OPPOSING_FACTION,
         }:
-            return FactionAgent(entity.entity_id, self.action_catalog).run_turn(
+            return FactionAgent(
+                entity.entity_id,
+                self.action_catalog,
+                self.capabilities,
+            ).run_turn(
                 entity,
                 world_state,
                 self.llm_client,
@@ -305,6 +421,89 @@ class TurnOrchestrator:
                 self.llm_client,
             )
         return None
+
+
+def _leak_triggered_scenario_events(
+    scenario_events: list[ScenarioEventDefinition],
+) -> list[ScenarioEventDefinition]:
+    return [
+        event
+        for event in scenario_events
+        if event.trigger.required_any_leaked_signal_action_ids
+        or event.trigger.required_any_leaked_signal_capability_ids
+    ]
+
+
+def _merge_routing_results(
+    first: RoutingResult,
+    second: RoutingResult,
+) -> RoutingResult:
+    return RoutingResult(
+        world_state=second.world_state,
+        deliveries=[*first.deliveries, *second.deliveries],
+        delayed_signals=[*first.delayed_signals, *second.delayed_signals],
+        leaked_signals=[*first.leaked_signals, *second.leaked_signals],
+        suppressed_signal_ids=[
+            *first.suppressed_signal_ids,
+            *second.suppressed_signal_ids,
+        ],
+        contradicted_delivery_ids=[
+            *first.contradicted_delivery_ids,
+            *second.contradicted_delivery_ids,
+        ],
+        public_timeline_entry_ids=[
+            *first.public_timeline_entry_ids,
+            *second.public_timeline_entry_ids,
+        ],
+        omniscient_timeline_entry_ids=[
+            *first.omniscient_timeline_entry_ids,
+            *second.omniscient_timeline_entry_ids,
+        ],
+        trace=[*first.trace, *second.trace],
+    )
+
+
+def _merge_scenario_event_results(
+    first: ScenarioEventResolution,
+    second: ScenarioEventResolution,
+    *,
+    world_state: WorldStateV2,
+) -> ScenarioEventResolution:
+    return ScenarioEventResolution(
+        world_state=world_state,
+        fired_events=[*first.fired_events, *second.fired_events],
+        emitted_signals=[*first.emitted_signals, *second.emitted_signals],
+        no_event_reason=(
+            ""
+            if first.fired_events or second.fired_events
+            else second.no_event_reason or first.no_event_reason
+        ),
+        trace=[*first.trace, *second.trace],
+        framing_summary=second.framing_summary or first.framing_summary,
+    )
+
+
+def _merge_ending_result(
+    scenario_event_result: ScenarioEventResolution,
+    ending_result: EndingEvaluation,
+    *,
+    world_state: WorldStateV2,
+) -> ScenarioEventResolution:
+    fired_events = list(scenario_event_result.fired_events)
+    if ending_result.event_record is not None:
+        fired_events.append(ending_result.event_record)
+    return ScenarioEventResolution(
+        world_state=world_state,
+        fired_events=fired_events,
+        emitted_signals=list(scenario_event_result.emitted_signals),
+        no_event_reason=(
+            ""
+            if fired_events
+            else scenario_event_result.no_event_reason
+        ),
+        trace=[*scenario_event_result.trace, *ending_result.trace],
+        framing_summary=scenario_event_result.framing_summary,
+    )
 
 
 def _llm_call_count(llm_client: LLMClient) -> int:
@@ -331,6 +530,20 @@ def _llm_call_records(
     return records
 
 
+def _event_candidate_from_output(output: AgentOutput | None) -> EventCandidate | None:
+    if output is None:
+        return None
+    for raw in reversed(output.raw_llm_outputs):
+        if raw.get("task") != "event_candidate":
+            continue
+        response = raw.get("response")
+        if isinstance(response, EventCandidate):
+            return response
+        if isinstance(response, dict):
+            return EventCandidate.model_validate(response)
+    return None
+
+
 def _render_turn_debug(
     *,
     start_turn: int,
@@ -340,6 +553,7 @@ def _render_turn_debug(
     agent_outputs: dict[str, AgentOutput],
     event_output: AgentOutput,
     scenario_event_result: ScenarioEventResolution | None,
+    ending_result: EndingEvaluation | None,
     batch_validation_report: BatchValidationReport | None,
     backchannel_update: BackchannelThreadUpdate | None,
     advisor_update: AdvisorCouncilUpdate | None,
@@ -360,12 +574,18 @@ def _render_turn_debug(
         "",
         "[player_gamemaster]",
         f"- rejected: {player_compilation.rejected}",
+        f"- action budget: {player_compilation.action_budget}",
+        f"- hard action limit: {player_compilation.hard_action_limit}",
         f"- compiled actions: {len(player_compilation.action_packages)}",
     ]
     if not player_compilation.action_packages:
         lines.append("- action: (none)")
     for package in player_compilation.action_packages:
-        lines.append(f"- {package.actor_id}: {package.action_id} via {package.channel.value}")
+        lines.append(f"- {package.actor_id}: {_package_label(package)} via {package.channel.value}")
+    lines.extend(f"- rejected intent: {intent}" for intent in player_compilation.rejected_intents)
+    lines.extend(
+        f"- unprocessed intent: {intent}" for intent in player_compilation.unprocessed_intents
+    )
     lines.extend(f"- error: {error}" for error in player_compilation.errors)
     lines.extend(f"- note: {note}" for note in player_compilation.notes)
     lines.extend(
@@ -376,14 +596,14 @@ def _render_turn_debug(
         ]
     )
     for package in action_packages:
-        lines.append(f"- {package.actor_id}: {package.action_id} via {package.channel.value}")
+        lines.append(f"- {package.actor_id}: {_package_label(package)} via {package.channel.value}")
     lines.extend(["", "[entity_agents]"])
     for entity_id, output in agent_outputs.items():
         lines.append(f"- {entity_id}: {output.perception_summary}")
         lines.append(f"  attempted action: {_attempted_action(output)}")
         if output.action_package is not None:
             lines.append(
-                f"  accepted package: {output.action_package.action_id} "
+                f"  accepted package: {_package_label(output.action_package)} "
                 f"via {output.action_package.channel.value}"
             )
         for note in output.debug_notes:
@@ -393,6 +613,12 @@ def _render_turn_debug(
             "",
             "[event_creator]",
             f"- {event_output.perception_summary}",
+        ]
+    )
+    for entry in event_output.public_timeline_delta:
+        lines.append(f"- media headline: {entry.title}: {entry.summary}")
+    lines.extend(
+        [
             "",
             "[scenario_events]",
             f"- fired: {len(scenario_event_result.fired_events) if scenario_event_result else 0}",
@@ -405,6 +631,16 @@ def _render_turn_debug(
             lines.append(f"- {record.event_id}: {record.title}")
             lines.extend(f"  effect: {effect}" for effect in record.effect_summary)
         for item in scenario_event_result.trace:
+            lines.append(f"  trace: {item}")
+    lines.extend(
+        [
+            "",
+            "[endings]",
+            f"- offered: {ending_result.offer_record.ending_id if ending_result and ending_result.offer_record else '(none)'}",
+        ]
+    )
+    if ending_result is not None:
+        for item in ending_result.trace:
             lines.append(f"  trace: {item}")
     lines.extend(
         [
@@ -462,7 +698,7 @@ def _render_turn_debug(
     for package in deterministic_result.rejected_actions:
         validation = deterministic_result.validation_results.get(package.package_id)
         reason = "; ".join(validation.errors) if validation is not None else "unknown reason"
-        lines.append(f"- rejected action: {package.actor_id}:{package.action_id} ({reason})")
+        lines.append(f"- rejected action: {package.actor_id}:{_package_label(package)} ({reason})")
     lines.extend(
         [
             "",
@@ -485,14 +721,23 @@ def _action_id(action_package: ActionPackage | None) -> str:
     return action_package.action_id if action_package is not None else "(none)"
 
 
+def _package_label(action_package: ActionPackage) -> str:
+    if action_package.capability_id:
+        return f"{action_package.action_id}/{action_package.capability_id}"
+    return action_package.action_id
+
+
 def _attempted_action(output: AgentOutput) -> str:
     if output.action_package is not None:
-        return output.action_package.action_id
+        return _package_label(output.action_package)
     for raw in reversed(output.raw_llm_outputs):
         if raw.get("task") != "faction_decision":
             continue
         response = raw.get("response")
         if isinstance(response, dict):
             action_id = response.get("action_id")
+            capability_id = response.get("capability_id")
+            if action_id and capability_id:
+                return f"{action_id}/{capability_id}"
             return str(action_id) if action_id else "(none)"
     return "(none)"

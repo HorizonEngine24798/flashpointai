@@ -1,14 +1,25 @@
 """Deterministic engine."""
 
-from crisis_room.engine.actions import ActionDefinition, ActionPackage
+from crisis_room.engine.actions import (
+    ActionDefinition,
+    ActionPackage,
+    ActionResolver,
+    CapabilityParameter,
+    CapabilityParameterKind,
+    ScenarioCapability,
+)
 
 __all__ = [
     "ActionDefinition",
     "ActionPackage",
+    "ActionResolver",
     "CausalTraceEntry",
+    "CapabilityParameter",
+    "CapabilityParameterKind",
     "DeterministicEngineV2",
     "DeterministicTurnResult",
     "FakeDeterministicEngine",
+    "ScenarioCapability",
 ]
 
 

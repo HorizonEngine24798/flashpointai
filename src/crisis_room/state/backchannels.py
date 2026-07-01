@@ -34,12 +34,17 @@ class BackchannelThread(BaseModel):
     leak_risk: float = Field(default=0.1, ge=0.0, le=1.0)
     max_player_messages: int = Field(default=1, ge=0)
     player_messages_used: int = Field(default=0, ge=0)
+    player_message_turn: int = Field(default=0, ge=0)
     message_records: list[BackchannelMessageRecord] = Field(default_factory=list)
     metadata: dict[str, str | int | float | bool] = Field(default_factory=dict)
 
     @property
     def player_messages_remaining(self) -> int:
         return max(0, self.max_player_messages - self.player_messages_used)
+
+    def player_messages_remaining_for_turn(self, turn_number: int) -> int:
+        used = self.player_messages_used if self.player_message_turn == turn_number else 0
+        return max(0, self.max_player_messages - used)
 
 
 class BackchannelThreadUpdate(BaseModel):

@@ -25,17 +25,11 @@ pytestmark = [
 EXPECTED_ONE_TURN_LABELS = [
     "dialogue.us_excomm.advisor_response",
     "gamemaster.us_excomm.intent_compilation",
-    "faction.soviet_presidium.perception_update",
-    "faction.soviet_presidium.internal_debate",
-    "faction.soviet_presidium.faction_decision",
-    "faction.cuba.perception_update",
-    "faction.cuba.internal_debate",
-    "faction.cuba.faction_decision",
-    "faction.nato_allies.perception_update",
-    "faction.nato_allies.internal_debate",
-    "faction.nato_allies.faction_decision",
+    "faction.soviet_presidium.turn",
+    "faction.cuba.turn",
+    "faction.nato_allies.turn",
     "international.international.pressure",
-    "event_creator.event_creator.candidate",
+    "event_creator.event_creator.media_event_turn",
 ]
 
 
@@ -85,6 +79,7 @@ def test_live_llm_one_turn_orchestrator_records_all_contracts() -> None:
     try:
         orchestrator = TurnOrchestrator(
             action_catalog=scenario.action_catalog,
+            capabilities=scenario.capabilities,
             llm_client=client,
         )
 

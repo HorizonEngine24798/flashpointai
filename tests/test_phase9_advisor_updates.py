@@ -15,6 +15,7 @@ def test_advisor_update_loop_mutates_persistent_council_after_turn() -> None:
     )
     orchestrator = TurnOrchestrator(
         action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
         llm_client=ScriptedLLMClient(),
     )
 
@@ -45,6 +46,7 @@ def test_advisor_updates_surface_in_aftermath_and_survive_world_hydration() -> N
     world = scenario.create_initial_world(rng_seed=62)
     orchestrator = TurnOrchestrator(
         action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
         llm_client=ScriptedLLMClient(),
     )
 

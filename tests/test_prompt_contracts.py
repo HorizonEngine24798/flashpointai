@@ -1,50 +1,63 @@
 from __future__ import annotations
 
-import json
+import pytest
+from pydantic import ValidationError
 
 from crisis_room.agents.context import build_visible_context
 from crisis_room.agents.faction import FactionAgent, NESTED_LLM_CONTEXT_LIMIT
 from crisis_room.app.turn_orchestrator import TurnOrchestrator
 from crisis_room.config.settings import LlamaCppSettings
-from crisis_room.llm.contracts import ChatRole, FakeLLMClient, LLMRequest
+from crisis_room.llm.contracts import FakeLLMClient
 from crisis_room.llm.llama_cpp_client import LlamaCppServerClient
 from crisis_room.llm.task_contracts import (
+    AdvisorCouncilResponse,
     AdvisorResponse,
+    BackchannelCounterpartResponse,
     EventCandidate,
+    EventCreatorResponse,
     FactionDecision,
+    FactionTurnResponse,
     IntentCompilation,
     InternalDebate,
     InternationalPressure,
     MultiIntentCompilation,
     PerceptionUpdate,
+    SignalDistortionResponse,
 )
 from crisis_room.scenario.schema import build_cuban_missile_crisis_1962_scenario
+from crisis_room.state.advisors import AdvisorBelief
+from crisis_room.state.events import EventChoiceOption, ScenarioEventChoiceRecord, ScenarioEventRecord
+from crisis_room.state.signals import SignalChannel
 
 
 GAMEPLAY_REQUEST_EXPECTATIONS = [
-    ("dialogue.us_excomm.advisor_response", "AdvisorResponse", 1400, AdvisorResponse),
+    (
+        "dialogue.us_excomm.advisor_response",
+        "AdvisorCouncilResponse",
+        1400,
+        AdvisorCouncilResponse,
+    ),
     (
         "gamemaster.us_excomm.intent_compilation",
         "MultiIntentCompilation",
         1800,
         MultiIntentCompilation,
     ),
-    ("faction.soviet_presidium.perception_update", "PerceptionUpdate", 1000, PerceptionUpdate),
-    ("faction.soviet_presidium.internal_debate", "InternalDebate", 1300, InternalDebate),
-    ("faction.soviet_presidium.faction_decision", "FactionDecision", 1200, FactionDecision),
-    ("faction.cuba.perception_update", "PerceptionUpdate", 1000, PerceptionUpdate),
-    ("faction.cuba.internal_debate", "InternalDebate", 1300, InternalDebate),
-    ("faction.cuba.faction_decision", "FactionDecision", 1200, FactionDecision),
-    ("faction.nato_allies.perception_update", "PerceptionUpdate", 1000, PerceptionUpdate),
-    ("faction.nato_allies.internal_debate", "InternalDebate", 1300, InternalDebate),
-    ("faction.nato_allies.faction_decision", "FactionDecision", 1200, FactionDecision),
+    ("faction.soviet_presidium.turn", "FactionTurnResponse", 2600, FactionTurnResponse),
+    ("faction.cuba.turn", "FactionTurnResponse", 2600, FactionTurnResponse),
+    ("faction.nato_allies.turn", "FactionTurnResponse", 2600, FactionTurnResponse),
     (
         "international.international.pressure",
         "InternationalPressure",
         1300,
         InternationalPressure,
     ),
-    ("event_creator.event_creator.candidate", "EventCandidate", 1300, EventCandidate),
+    (
+        "event_creator.event_creator.media_event_turn",
+        "EventCreatorResponse",
+        1800,
+        EventCreatorResponse,
+    ),
 ]
 
 
@@ -54,6 +67,7 @@ def test_gameplay_llm_requests_are_schema_guided_and_bounded() -> None:
     fake_llm = FakeLLMClient(_turn_responses())
     orchestrator = TurnOrchestrator(
         action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
         llm_client=fake_llm,
     )
 
@@ -66,7 +80,13 @@ def test_gameplay_llm_requests_are_schema_guided_and_bounded() -> None:
     )
 
     requests = [call.request for call in fake_llm.calls]
-    assert [request.label for request in requests] == [
+    gameplay_requests = [
+        request for request in requests if not request.label.startswith("info_channel.")
+    ]
+    distortion_requests = [
+        request for request in requests if request.label.startswith("info_channel.")
+    ]
+    assert [request.label for request in gameplay_requests] == [
         label for label, _, _, _ in GAMEPLAY_REQUEST_EXPECTATIONS
     ]
 
@@ -75,7 +95,7 @@ def test_gameplay_llm_requests_are_schema_guided_and_bounded() -> None:
     )
     try:
         for request, (_, schema_name, max_tokens, response_model) in zip(
-            requests,
+            gameplay_requests,
             GAMEPLAY_REQUEST_EXPECTATIONS,
             strict=True,
         ):
@@ -96,6 +116,14 @@ def test_gameplay_llm_requests_are_schema_guided_and_bounded() -> None:
             assert payload["temperature"] == 0.2
             assert payload["top_p"] == 0.9
             assert payload["max_tokens"] == max_tokens
+        for request in distortion_requests:
+            prompt_text = "\n".join(message.content for message in request.messages)
+            assert request.response_schema_name == "SignalDistortionResponse"
+            assert request.max_tokens == 350
+            assert "SignalDistortionResponse contract:" in prompt_text
+            payload = client.build_payload(request, SignalDistortionResponse)
+            response_format = payload["response_format"]
+            assert response_format["json_schema"]["name"] == "SignalDistortionResponse"
     finally:
         client.close()
 
@@ -110,6 +138,7 @@ def test_visible_context_limits_timelines_inbox_and_action_catalog() -> None:
         world.actors["us_excomm"],
         world,
         action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
         timeline_limit=2,
         inbox_limit=0,
         action_catalog_limit=1,
@@ -123,7 +152,7 @@ def test_visible_context_limits_timelines_inbox_and_action_catalog() -> None:
     assert len(context["action_catalog"]) == 1
     assert "truth_metric_effects" not in context["action_catalog"][0]
     assert context["context_limits"]["action_catalog_total"] == len(
-        scenario.action_catalog
+        scenario.capabilities
     )
     assert context["context_limits"]["action_catalog_truncated"] is True
 
@@ -131,6 +160,7 @@ def test_visible_context_limits_timelines_inbox_and_action_catalog() -> None:
         world.actors["us_excomm"],
         world,
         action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
         timeline_limit=0,
         action_catalog_limit=0,
     )
@@ -139,7 +169,148 @@ def test_visible_context_limits_timelines_inbox_and_action_catalog() -> None:
     assert empty_context["action_catalog"] == []
 
 
-def test_faction_followup_contexts_bound_nested_llm_outputs() -> None:
+def test_visible_context_bounds_events_advisors_choices_and_prompt_hints() -> None:
+    scenario = build_cuban_missile_crisis_1962_scenario()
+    world = scenario.create_initial_world(rng_seed=520)
+    player_id = scenario.player_entity_id
+    for index in range(5):
+        world.event_history.append(
+            ScenarioEventRecord(
+                event_id=f"visible_event_{index}",
+                title=f"Visible Event {index}",
+                summary=f"Event summary {index}",
+                turn_number=index + 1,
+                visible_to=[player_id],
+                problem_title=f"Problem {index}",
+                problem_summary=f"Problem summary {index}",
+                effect_summary=["truth:secret moved"],
+            )
+        )
+        world.pending_event_choices.append(
+            ScenarioEventChoiceRecord(
+                choice_id=f"choice_{index}",
+                event_id=f"visible_event_{index}",
+                title=f"Choice Event {index}",
+                prompt=f"Prompt {index}",
+                turn_number=world.turn_number,
+                expires_turn=world.turn_number + 1,
+                visible_to=[player_id],
+                options=[
+                    EventChoiceOption(
+                        option_id=f"option_{index}",
+                        label=f"Option {index}",
+                        action_id="private_diplomacy",
+                        capability_id="cuba_open_kremlin_channel",
+                        target_ids=["soviet_presidium"],
+                        channel=SignalChannel.BACKCHANNEL,
+                    )
+                ],
+            )
+        )
+    council = world.advisor_councils[player_id]
+    state_advisor = council.advisors["state"]
+    state_advisor.beliefs = {
+        f"belief_{index}": AdvisorBelief(
+            topic=f"belief_{index}",
+            summary=f"Belief summary {index}",
+        )
+        for index in range(5)
+    }
+    state_advisor.recent_recommendations = ["first", "second", "third"]
+    state_advisor.recent_embarrassments = ["missed signal", "late warning"]
+
+    context = build_visible_context(
+        world.actors[player_id],
+        world,
+        action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
+        event_history_limit=2,
+        pending_choice_limit=1,
+        advisor_belief_limit=2,
+        advisor_recent_note_limit=1,
+        action_catalog_limit=1,
+        action_prompt_hint_limit=1,
+    )
+
+    assert [event["event_id"] for event in context["recent_events"]] == [
+        "visible_event_3",
+        "visible_event_4",
+    ]
+    assert "effect_summary" not in context["recent_events"][0]
+    assert [choice["choice_id"] for choice in context["pending_event_choices"]] == [
+        "choice_4"
+    ]
+    first_advisor = context["advisor_council"]["advisors"][0]
+    assert len(first_advisor["beliefs"]) == 2
+    assert first_advisor["beliefs_total"] == 5
+    assert first_advisor["recent_recommendations"] == ["third"]
+    assert first_advisor["recent_embarrassments"] == ["late warning"]
+    assert len(context["action_catalog"][0]["prompt_hints"]) == 1
+    assert context["context_limits"]["event_history_limit"] == 2
+    assert context["context_limits"]["pending_event_choice_limit"] == 1
+    assert context["context_limits"]["advisor_belief_limit"] == 2
+
+
+def test_task_contracts_reject_extra_fields_and_scalar_coercion() -> None:
+    with pytest.raises(ValidationError):
+        AdvisorCouncilResponse.model_validate(
+            {"answer": "Use the channel.", "invented_mechanic": "free action"}
+        )
+    with pytest.raises(ValidationError):
+        EventCandidate.model_validate(
+            {
+                "candidate_id": "bad_candidate",
+                "kind": "chaos",
+                "title": "Bad Candidate",
+                "summary": "The model smuggles a string numeric.",
+                "plausibility": "0.75",
+            }
+        )
+    with pytest.raises(ValidationError):
+        BackchannelCounterpartResponse.model_validate(
+            {"accepted": "true", "response_text": "We are listening."}
+        )
+    with pytest.raises(ValidationError):
+        EventCandidate.model_validate(
+            {
+                "candidate_id": "bad_effect_hint",
+                "kind": "chaos",
+                "title": "Bad Effect Hint",
+                "summary": "The model smuggles a string effect delta.",
+                "deterministic_effect_hints": {"public_alarm": "0.2"},
+            }
+        )
+
+
+def test_multi_intent_contract_does_not_truncate_extra_candidates() -> None:
+    candidates = [
+        {
+            "accepted": True,
+            "action_id": "private_diplomacy",
+            "capability_id": "cuba_open_kremlin_channel",
+            "target_ids": ["soviet_presidium"],
+            "intent_summary": f"Candidate {index}",
+        }
+        for index in range(4)
+    ]
+
+    compiled = MultiIntentCompilation.model_validate(
+        {
+            "accepted": True,
+            "candidates": candidates,
+        }
+    )
+
+    assert len(compiled.candidates) == 4
+    assert [candidate.intent_summary for candidate in compiled.candidates] == [
+        "Candidate 0",
+        "Candidate 1",
+        "Candidate 2",
+        "Candidate 3",
+    ]
+
+
+def test_faction_single_turn_records_rich_outputs_without_followup_calls() -> None:
     scenario = build_cuban_missile_crisis_1962_scenario()
     world = scenario.create_initial_world(rng_seed=53)
     item_count = NESTED_LLM_CONTEXT_LIMIT + 2
@@ -164,7 +335,8 @@ def test_faction_followup_contexts_bound_nested_llm_outputs() -> None:
                     {
                         "narrative_id": f"narrative_{index}",
                         "argument": f"argument {index}",
-                        "preferred_action_id": "soviet_probe_compromise",
+                        "preferred_action_id": "private_diplomacy",
+                        "preferred_capability_id": "soviet_compromise_probe",
                         "target_entity_ids": ["us_excomm"],
                     }
                     for index in range(item_count)
@@ -184,47 +356,35 @@ def test_faction_followup_contexts_bound_nested_llm_outputs() -> None:
         }
     )
 
-    FactionAgent("soviet_presidium", scenario.action_catalog).run_turn(
+    FactionAgent(
+        "soviet_presidium",
+        scenario.action_catalog,
+        scenario.capabilities,
+    ).run_turn(
         world.actors["soviet_presidium"],
         world,
         fake_llm,
     )
 
-    debate_context = _visible_context_from_request(fake_llm.calls[1].request)
-    decision_context = _visible_context_from_request(fake_llm.calls[2].request)
-
-    perception = debate_context["perception_update"]
-    assert len(perception["belief_updates"]) == NESTED_LLM_CONTEXT_LIMIT
-    assert len(perception["uncertainty_notes"]) == NESTED_LLM_CONTEXT_LIMIT
-    assert perception["nested_context_limits"]["belief_updates_total"] == item_count
-    assert perception["nested_context_limits"]["belief_updates_truncated"] is True
-
-    debate = decision_context["internal_debate"]
-    assert len(debate["positions"]) == NESTED_LLM_CONTEXT_LIMIT
-    assert len(debate["unresolved_disagreements"]) == NESTED_LLM_CONTEXT_LIMIT
-    assert debate["nested_context_limits"]["positions_total"] == item_count
-    assert debate["nested_context_limits"]["positions_truncated"] is True
-
-
-def _visible_context_from_request(request: LLMRequest) -> dict[str, object]:
-    user_message = next(
-        message.content for message in request.messages if message.role == ChatRole.USER
-    )
-    context_text = user_message.split("Visible context JSON:\n", 1)[1].split(
-        "\n\nTask:\n",
-        1,
-    )[0]
-    parsed = json.loads(context_text)
-    assert isinstance(parsed, dict)
-    return parsed
+    assert [call.request.label for call in fake_llm.calls] == [
+        "faction.soviet_presidium.turn"
+    ]
+    raw_turn = fake_llm.calls[0].parsed_response
+    assert isinstance(raw_turn, dict)
+    assert len(raw_turn["perception_update"]["belief_updates"]) == item_count
+    assert len(raw_turn["perception_update"]["uncertainty_notes"]) == item_count
+    assert len(raw_turn["internal_debate"]["positions"]) == item_count
+    assert len(raw_turn["internal_debate"]["unresolved_disagreements"]) == item_count
 
 
 def _turn_responses() -> dict[str, object]:
     return {
         "dialogue.us_excomm.advisor_response": {
             "answer": "Keep the public line calm and test a private reciprocal pause.",
+            "council_summary": "State leads, with Defense asking for credible pressure.",
             "advisor_views": [
                 {
+                    "advisor_id": "state",
                     "advisor_name": "State",
                     "stance": "open a quiet channel",
                     "reasoning": "It preserves off-ramp optionality.",
@@ -232,15 +392,18 @@ def _turn_responses() -> dict[str, object]:
                 }
             ],
             "risk_warnings": ["A public threat could narrow room for compromise."],
-            "suggested_action_ids": ["private_kremlin_backchannel"],
+            "suggested_capability_ids": ["cuba_open_kremlin_channel"],
+            "suggested_action_ids": ["private_diplomacy"],
         },
         "gamemaster.us_excomm.intent_compilation": {
             "accepted": True,
-            "action_id": "private_kremlin_backchannel",
+            "action_id": "private_diplomacy",
+            "capability_id": "cuba_open_kremlin_channel",
             "target_ids": ["soviet_presidium"],
             "channel": "backchannel",
             "intent_summary": "Open a private Kremlin channel for reciprocal restraint.",
             "private_rationale": "Test whether a managed pause is available.",
+            "parameters": {},
         },
         "faction.soviet_presidium.perception_update": {
             "situation_summary": "The opponent appears to be probing for restraint.",
@@ -257,7 +420,8 @@ def _turn_responses() -> dict[str, object]:
                 {
                     "narrative_id": "settlement",
                     "argument": "A deniable probe could protect our public posture.",
-                    "preferred_action_id": "soviet_probe_compromise",
+                    "preferred_action_id": "private_diplomacy",
+                    "preferred_capability_id": "soviet_compromise_probe",
                     "target_entity_ids": ["us_excomm"],
                     "perceived_risk": 0.35,
                 }
@@ -266,13 +430,15 @@ def _turn_responses() -> dict[str, object]:
             "dominant_narrative_id": "settlement",
         },
         "faction.soviet_presidium.faction_decision": {
-            "action_id": "soviet_probe_compromise",
+            "action_id": "private_diplomacy",
+            "capability_id": "soviet_compromise_probe",
             "target_ids": ["us_excomm"],
             "channel": "backchannel",
             "intent_summary": "Ask privately whether reciprocal restraint remains possible.",
             "private_rationale": "Avoid public capitulation while testing the exit.",
             "commitment_level": 0.45,
             "risk_acceptance": 0.35,
+            "parameters": {},
         },
         "faction.cuba.perception_update": {
             "situation_summary": "Havana sees invasion risk in every U.S. signal.",
@@ -289,7 +455,8 @@ def _turn_responses() -> dict[str, object]:
                 {
                     "narrative_id": "defiant",
                     "argument": "Raise readiness to deter attack.",
-                    "preferred_action_id": "cuban_air_defense_alert",
+                    "preferred_action_id": "military_posture",
+                    "preferred_capability_id": "cuba_air_defense_alert",
                     "target_entity_ids": ["us_excomm"],
                     "perceived_risk": 0.65,
                 }
@@ -298,13 +465,15 @@ def _turn_responses() -> dict[str, object]:
             "dominant_narrative_id": "defiant",
         },
         "faction.cuba.faction_decision": {
-            "action_id": "cuban_air_defense_alert",
+            "action_id": "military_posture",
+            "capability_id": "cuba_air_defense_alert",
             "target_ids": ["us_excomm"],
             "channel": "military",
             "intent_summary": "Raise Cuban air defense alert.",
             "private_rationale": "Deter invasion and force Cuba's position into the crisis.",
             "commitment_level": 0.7,
             "risk_acceptance": 0.62,
+            "parameters": {},
         },
         "faction.nato_allies.perception_update": {
             "situation_summary": "Allies need consultation before backing the next public move.",
@@ -321,7 +490,8 @@ def _turn_responses() -> dict[str, object]:
                 {
                     "narrative_id": "solidarity",
                     "argument": "Ask for reassurance while supporting Washington.",
-                    "preferred_action_id": "nato_reassurance_request",
+                    "preferred_action_id": "private_diplomacy",
+                    "preferred_capability_id": "nato_reassurance_pressure",
                     "target_entity_ids": ["us_excomm"],
                     "perceived_risk": 0.4,
                 }
@@ -330,13 +500,15 @@ def _turn_responses() -> dict[str, object]:
             "dominant_narrative_id": "solidarity",
         },
         "faction.nato_allies.faction_decision": {
-            "action_id": "nato_reassurance_request",
+            "action_id": "private_diplomacy",
+            "capability_id": "nato_reassurance_pressure",
             "target_ids": ["us_excomm"],
             "channel": "private_diplomatic",
             "intent_summary": "Ask Washington for reassurance and consultation.",
             "private_rationale": "Allied backing is stronger when allies are not surprised.",
             "commitment_level": 0.45,
             "risk_acceptance": 0.25,
+            "parameters": {},
         },
         "international.international.pressure": {
             "situation_summary": "External actors are calling for visible restraint.",

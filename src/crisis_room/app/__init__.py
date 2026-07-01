@@ -8,6 +8,7 @@ from crisis_room.app.debug_sessions import (
     load_debug_session,
 )
 from crisis_room.app.planning import PlayerPlanPreview
+from crisis_room.app.session import GameSession
 from crisis_room.app.turn_orchestrator import (
     OrchestratedTurnResult,
     TurnDebugTranscript,
@@ -18,6 +19,7 @@ __all__ = [
     "DebugSessionRecord",
     "DebugSessionRecorder",
     "DialogueDebugRecord",
+    "GameSession",
     "PlanPreviewDebugRecord",
     "OrchestratedTurnResult",
     "PlayerPlanPreview",

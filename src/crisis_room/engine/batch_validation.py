@@ -5,7 +5,18 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
-from crisis_room.engine.actions import ActionDefinition, ActionPackage
+from crisis_room.config.gameplay import (
+    CURRENT_TURN_TIMINGS,
+    NORMAL_ACTION_BUDGET,
+    PUBLIC_COVERT_DEESCALATION_THRESHOLD,
+    PUBLIC_COVERT_ESCALATION_THRESHOLD,
+)
+from crisis_room.engine.actions import (
+    ActionDefinition,
+    ActionPackage,
+    ActionResolver,
+    ScenarioCapability,
+)
 from crisis_room.engine.resources import merge_requirements
 from crisis_room.state.backchannels import BackchannelThreadStatus
 from crisis_room.state.signals import SignalChannel
@@ -43,21 +54,36 @@ def build_batch_validation_report(
     action_catalog: list[ActionDefinition],
     *,
     player_entity_id: str,
+    capabilities: list[ScenarioCapability] | None = None,
+    action_budget: int = NORMAL_ACTION_BUDGET,
 ) -> BatchValidationReport:
-    catalog = {definition.action_id: definition for definition in action_catalog}
+    resolver = ActionResolver(action_catalog, capabilities)
     warnings: list[BatchValidationWarning] = []
-    warnings.extend(_duplicate_cooldown_warnings(action_packages, catalog))
-    warnings.extend(_resource_contention_warnings(world_state, action_packages, catalog))
-    warnings.extend(_public_covert_pairing_warnings(action_packages, catalog))
+    warnings.extend(
+        _action_budget_warnings(
+            action_packages,
+            player_entity_id=player_entity_id,
+            action_budget=action_budget,
+        )
+    )
+    warnings.extend(
+        _agenda_shape_warnings(
+            action_packages,
+            resolver,
+            player_entity_id=player_entity_id,
+        )
+    )
+    warnings.extend(_resource_contention_warnings(world_state, action_packages, resolver))
+    warnings.extend(_public_covert_pairing_warnings(action_packages, resolver))
     warnings.extend(
         _backchannel_channel_warnings(
             world_state,
             action_packages,
-            catalog,
+            resolver,
             player_entity_id=player_entity_id,
         )
     )
-    warnings.extend(_fallback_misuse_warnings(action_packages, catalog))
+    warnings.extend(_fallback_misuse_warnings(action_packages, resolver))
     return BatchValidationReport(
         warnings=_apply_player_visibility(
             _dedupe_warnings(warnings),
@@ -70,46 +96,77 @@ def format_batch_warning(warning: BatchValidationWarning) -> str:
     return warning.message
 
 
-def _duplicate_cooldown_warnings(
+def _action_budget_warnings(
     action_packages: list[ActionPackage],
-    catalog: dict[str, ActionDefinition],
+    *,
+    player_entity_id: str,
+    action_budget: int,
 ) -> list[BatchValidationWarning]:
-    by_actor_action: dict[tuple[str, str], list[ActionPackage]] = defaultdict(list)
-    for package in action_packages:
-        definition = catalog.get(package.action_id)
-        if definition is None or definition.cooldown_turns <= 0:
-            continue
-        by_actor_action[(package.actor_id, package.action_id)].append(package)
-
-    warnings: list[BatchValidationWarning] = []
-    for (actor_id, action_id), packages in by_actor_action.items():
-        if len(packages) < 2:
-            continue
-        definition = catalog[action_id]
-        warnings.append(
-            BatchValidationWarning(
-                code="duplicate_cooldown_action",
-                actor_id=actor_id,
-                action_ids=[action_id],
-                package_ids=[package.package_id for package in packages],
-                message=(
-                    f"{actor_id} submitted {definition.title} more than once; "
-                    "the first accepted package can place the rest on cooldown."
-                ),
-            )
+    player_packages = [
+        package for package in action_packages if package.actor_id == player_entity_id
+    ]
+    if len(player_packages) <= action_budget:
+        return []
+    return [
+        BatchValidationWarning(
+            code="action_budget_exceeded",
+            actor_id=player_entity_id,
+            action_ids=[package.mechanical_id for package in player_packages],
+            package_ids=[package.package_id for package in player_packages],
+            message=(
+                f"{player_entity_id} queued {len(player_packages)} formal actions; "
+                f"the normal budget is {action_budget}."
+            ),
         )
-    return warnings
+    ]
+
+
+def _agenda_shape_warnings(
+    action_packages: list[ActionPackage],
+    resolver: ActionResolver,
+    *,
+    player_entity_id: str,
+) -> list[BatchValidationWarning]:
+    player_packages = [
+        package for package in action_packages if package.actor_id == player_entity_id
+    ]
+    if len(player_packages) < 2:
+        return []
+    categories: dict[str, list[ActionPackage]] = defaultdict(list)
+    for package in player_packages:
+        definition = _resolve(resolver, package)
+        if definition is None:
+            continue
+        categories[definition.category.value].append(package)
+    if not categories:
+        return []
+    category, packages = max(categories.items(), key=lambda item: len(item[1]))
+    if len(packages) < len(player_packages):
+        return []
+    return [
+        BatchValidationWarning(
+            code="agenda_shape_concentrated",
+            severity=BatchWarningSeverity.INFO,
+            actor_id=player_entity_id,
+            action_ids=[package.mechanical_id for package in packages],
+            package_ids=[package.package_id for package in packages],
+            message=(
+                f"All compiled player actions are {category}; that can be valid, "
+                "but it narrows this turn's agenda shape."
+            ),
+        )
+    ]
 
 
 def _resource_contention_warnings(
     world_state: WorldStateV2,
     action_packages: list[ActionPackage],
-    catalog: dict[str, ActionDefinition],
+    resolver: ActionResolver,
 ) -> list[BatchValidationWarning]:
     by_actor_resource: dict[tuple[str, str], list[ActionPackage]] = defaultdict(list)
     totals: dict[tuple[str, str], int] = defaultdict(int)
     for package in action_packages:
-        definition = catalog.get(package.action_id)
+        definition = _resolve(resolver, package)
         actor = world_state.actors.get(package.actor_id)
         if definition is None or actor is None:
             continue
@@ -130,15 +187,14 @@ def _resource_contention_warnings(
         if total <= available:
             continue
         action_titles = [
-            catalog[package.action_id].title
+            _definition_title(resolver, package)
             for package in packages
-            if package.action_id in catalog
         ]
         warnings.append(
             BatchValidationWarning(
                 code="resource_contention",
                 actor_id=actor_id,
-                action_ids=[package.action_id for package in packages],
+                action_ids=[package.mechanical_id for package in packages],
                 package_ids=[package.package_id for package in packages],
                 resource=resource,
                 message=(
@@ -153,7 +209,7 @@ def _resource_contention_warnings(
 
 def _public_covert_pairing_warnings(
     action_packages: list[ActionPackage],
-    catalog: dict[str, ActionDefinition],
+    resolver: ActionResolver,
 ) -> list[BatchValidationWarning]:
     by_actor_target: dict[tuple[str, str], list[ActionPackage]] = defaultdict(list)
     for package in action_packages:
@@ -172,10 +228,13 @@ def _public_covert_pairing_warnings(
         if not public_packages or not covert_packages:
             continue
         public_escalatory = any(
-            _definition_risk(catalog, package) >= 0.3 for package in public_packages
+            _definition_risk(resolver, package) >= PUBLIC_COVERT_ESCALATION_THRESHOLD
+            for package in public_packages
         )
         covert_deescalatory = any(
-            _definition_deescalation(catalog, package) >= 0.25 for package in covert_packages
+            _definition_deescalation(resolver, package)
+            >= PUBLIC_COVERT_DEESCALATION_THRESHOLD
+            for package in covert_packages
         )
         if not public_escalatory or not covert_deescalatory:
             continue
@@ -184,7 +243,7 @@ def _public_covert_pairing_warnings(
             BatchValidationWarning(
                 code="public_covert_tension",
                 actor_id=actor_id,
-                action_ids=[package.action_id for package in packages_to_report],
+                action_ids=[package.mechanical_id for package in packages_to_report],
                 package_ids=[package.package_id for package in packages_to_report],
                 target_ids=[target_id],
                 message=(
@@ -200,7 +259,7 @@ def _public_covert_pairing_warnings(
 def _backchannel_channel_warnings(
     world_state: WorldStateV2,
     action_packages: list[ActionPackage],
-    catalog: dict[str, ActionDefinition],
+    resolver: ActionResolver,
     *,
     player_entity_id: str,
 ) -> list[BatchValidationWarning]:
@@ -213,14 +272,14 @@ def _backchannel_channel_warnings(
         for target_id in package.target_ids:
             if _has_open_backchannel(world_state, package.actor_id, target_id):
                 continue
-            definition = catalog.get(package.action_id)
-            if definition is not None and "backchannel" in definition.action_id:
+            definition = _resolve(resolver, package)
+            if definition is not None and "opens_backchannel" in definition.event_hooks:
                 continue
             warnings.append(
                 BatchValidationWarning(
                     code="missing_backchannel_thread",
                     actor_id=package.actor_id,
-                    action_ids=[package.action_id],
+                    action_ids=[package.mechanical_id],
                     package_ids=[package.package_id],
                     target_ids=[target_id],
                     message=(
@@ -235,21 +294,21 @@ def _backchannel_channel_warnings(
 
 def _fallback_misuse_warnings(
     action_packages: list[ActionPackage],
-    catalog: dict[str, ActionDefinition],
+    resolver: ActionResolver,
 ) -> list[BatchValidationWarning]:
     warnings: list[BatchValidationWarning] = []
     for package in action_packages:
         if not package.fallback_condition:
             continue
-        if package.requested_timing not in {"current_turn", "now", "immediate"}:
+        if package.requested_timing not in CURRENT_TURN_TIMINGS:
             continue
-        definition = catalog.get(package.action_id)
-        title = definition.title if definition is not None else package.action_id
+        definition = _resolve(resolver, package)
+        title = definition.title if definition is not None else package.mechanical_id
         warnings.append(
             BatchValidationWarning(
                 code="fallback_submitted_now",
                 actor_id=package.actor_id,
-                action_ids=[package.action_id],
+                action_ids=[package.mechanical_id],
                 package_ids=[package.package_id],
                 message=(
                     f"{title} includes a fallback condition but is submitted for "
@@ -272,19 +331,35 @@ def _resource_spend(definition: ActionDefinition) -> dict[str, int]:
 
 
 def _definition_risk(
-    catalog: dict[str, ActionDefinition],
+    resolver: ActionResolver,
     package: ActionPackage,
 ) -> float:
-    definition = catalog.get(package.action_id)
+    definition = _resolve(resolver, package)
     return definition.escalation_risk if definition is not None else 0.0
 
 
 def _definition_deescalation(
-    catalog: dict[str, ActionDefinition],
+    resolver: ActionResolver,
     package: ActionPackage,
 ) -> float:
-    definition = catalog.get(package.action_id)
+    definition = _resolve(resolver, package)
     return definition.deescalation_potential if definition is not None else 0.0
+
+
+def _resolve(
+    resolver: ActionResolver,
+    package: ActionPackage,
+) -> ActionDefinition | None:
+    definition, errors = resolver.resolve_package(package)
+    return None if errors else definition
+
+
+def _definition_title(
+    resolver: ActionResolver,
+    package: ActionPackage,
+) -> str:
+    definition = _resolve(resolver, package)
+    return definition.title if definition is not None else package.mechanical_id
 
 
 def _has_open_backchannel(

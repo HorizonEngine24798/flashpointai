@@ -5,6 +5,9 @@ from typing import Protocol
 
 from pydantic import BaseModel, Field
 
+from crisis_room.agents.context import build_task_request
+from crisis_room.llm.contracts import LLMClient
+from crisis_room.llm.task_contracts import SignalDistortionResponse
 from crisis_room.state.signals import (
     PayloadType,
     Signal,
@@ -99,8 +102,14 @@ class PrototypeInfoChannel:
     receive only delivery packets as perceived by that entity.
     """
 
-    def __init__(self, config: InfoChannelConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: InfoChannelConfig | None = None,
+        *,
+        llm_client: LLMClient | None = None,
+    ) -> None:
         self.config = config or InfoChannelConfig.defaults()
+        self.llm_client = llm_client
 
     def route_signals(
         self,
@@ -142,36 +151,48 @@ class PrototypeInfoChannel:
             result.trace.append(f"suppressed {signal.signal_id}")
             return world_state
 
-        if signal.is_public and rule.public_timeline_on_delivery:
-            entry = self._append_public_signal(world_state, signal)
+        observed_signal, observed_reliability, distorted, contradictory, notes = (
+            self._observe_signal(world_state, signal, rule)
+        )
+
+        if observed_signal.is_public and rule.public_timeline_on_delivery:
+            entry = self._append_public_signal(world_state, observed_signal)
             result.public_timeline_entry_ids.append(entry.entry_id)
 
         deliveries: list[SignalDelivery] = []
-        for recipient_id in self._recipients(world_state, signal):
-            delivery = self._deliver_to(world_state, signal, recipient_id, rule)
+        for recipient_id in self._recipients(world_state, observed_signal):
+            delivery = self._deliver_to(
+                world_state,
+                observed_signal,
+                recipient_id,
+                observed_reliability=observed_reliability,
+                distorted=distorted,
+                contradictory=contradictory,
+                notes=notes,
+            )
             world_state.deliver_to_entity(delivery)
             result.deliveries.append(delivery)
             deliveries.append(delivery)
             if delivery.contradiction_applied:
                 result.contradicted_delivery_ids.append(delivery.delivery_id)
             result.trace.append(
-                f"delivered {signal.signal_id} to {recipient_id}"
+                f"delivered {observed_signal.signal_id} to {recipient_id}"
                 + (" with contradiction" if delivery.contradiction_applied else "")
                 + (" with distortion" if delivery.distortion_applied else "")
             )
 
-        self._append_delivery_audit(world_state, result, signal, deliveries)
+        self._append_delivery_audit(world_state, result, observed_signal, deliveries)
 
-        leak = self._maybe_leak(world_state, signal, rule)
+        leak = self._maybe_leak(world_state, observed_signal, rule)
         if leak is not None:
             result.leaked_signals.append(leak)
-            result.trace.append(f"leaked {signal.signal_id} as {leak.signal_id}")
+            result.trace.append(f"leaked {observed_signal.signal_id} as {leak.signal_id}")
             self._append_omniscient_transform(
                 world_state,
                 result,
-                signal,
+                observed_signal,
                 "Signal Leaked",
-                f"{signal.signal_id} leaked into public rumor as {leak.signal_id}.",
+                f"{observed_signal.signal_id} leaked into public rumor as {leak.signal_id}.",
                 leaked=True,
                 leak_signal_id=leak.signal_id,
             )
@@ -203,21 +224,20 @@ class PrototypeInfoChannel:
             if recipient_id in world_state.actors
         ]
 
-    def _deliver_to(
+    def _observe_signal(
         self,
         world_state: WorldStateV2,
         signal: Signal,
-        recipient_id: str,
         rule: ChannelRule,
-    ) -> SignalDelivery:
-        contradiction = self._score(world_state, signal, recipient_id, "contradict")
+    ) -> tuple[Signal, float, bool, bool, list[str]]:
+        contradiction = self._score(world_state, signal, "all", "contradict")
         contradiction_risk = _metadata_float(
             signal,
             "contradiction_risk",
             rule.contradiction_risk,
         )
         contradictory = contradiction < contradiction_risk
-        distortion = self._score(world_state, signal, recipient_id, "distort")
+        distortion = self._score(world_state, signal, "all", "distort")
         distortion_risk = min(1.0, signal.distortion_risk * rule.distortion_multiplier)
         distorted = not contradictory and distortion < distortion_risk
         reliability = signal.reliability
@@ -225,14 +245,103 @@ class PrototypeInfoChannel:
         notes: list[str] = []
         if contradictory:
             reliability = max(0.0, signal.reliability - rule.reliability_penalty_on_distortion - 0.15)
-            content = f"Contradictory report: sources dispute whether {signal.content}"
+            content, note = self._distort_content(
+                world_state,
+                signal,
+                "contradictory",
+                f"Contradictory report: sources dispute whether {signal.content}",
+                reliability,
+            )
             notes.append("content contradicted by channel or source conflict")
+            if note:
+                notes.append(note)
         elif distorted:
             reliability = max(0.0, signal.reliability - rule.reliability_penalty_on_distortion)
-            content = f"Distorted report: {signal.content}"
+            content, note = self._distort_content(
+                world_state,
+                signal,
+                "distorted",
+                f"Distorted report: {signal.content}",
+                reliability,
+            )
             notes.append("content distorted by channel risk")
+            if note:
+                notes.append(note)
         if signal.metadata.get("source_credibility_note"):
             notes.append(str(signal.metadata["source_credibility_note"]))
+
+        if not distorted and not contradictory:
+            return signal, reliability, distorted, contradictory, notes
+
+        observed_signal = signal.model_copy(deep=True)
+        observed_signal.content = content
+        observed_signal.reliability = reliability
+        observed_signal.metadata["info_channel_distortion_applied"] = distorted
+        observed_signal.metadata["info_channel_contradiction_applied"] = contradictory
+        return observed_signal, reliability, distorted, contradictory, notes
+
+    def _distort_content(
+        self,
+        world_state: WorldStateV2,
+        signal: Signal,
+        kind: str,
+        fallback: str,
+        reliability: float,
+    ) -> tuple[str, str]:
+        if self.llm_client is None:
+            return fallback, ""
+        request = build_task_request(
+            label=f"info_channel.{signal.signal_id}.{kind}",
+            system_prompt=(
+                "You are the communications noise layer in a crisis simulation. "
+                "Rewrite the message as it is actually observed after channel "
+                "unreliability."
+            ),
+            visible_context={
+                "scenario_id": world_state.scenario_id,
+                "turn_number": world_state.turn_number,
+                "kind": kind,
+                "channel": signal.channel.value,
+                "payload_type": signal.payload_type.value,
+                "visibility": signal.visibility.value,
+                "source_entity_id": signal.source_entity_id,
+                "recipient_entity_ids": signal.recipient_entity_ids,
+                "classification": signal.classification,
+                "original_content": signal.content,
+                "observed_reliability": reliability,
+            },
+            task_instruction=(
+                "Return the message text recipients observe. Make the distortion "
+                "substantive but plausible: ambiguity, missing qualifiers, garbled "
+                "causality, softened or hardened intent, or conflicting sourcing. "
+                "Do not simply prefix the original text."
+            ),
+            response_schema_name="SignalDistortionResponse",
+            metadata={
+                "agent": "info_channel",
+                "signal_id": signal.signal_id,
+                "turn_number": world_state.turn_number,
+            },
+            max_tokens=350,
+        )
+        try:
+            response = self.llm_client.complete_json(request, SignalDistortionResponse)
+        except Exception:
+            return fallback, "LLM distortion failed; fallback wording used"
+        content = response.observed_content.strip()
+        return content or fallback, response.distortion_note.strip()
+
+    def _deliver_to(
+        self,
+        world_state: WorldStateV2,
+        signal: Signal,
+        recipient_id: str,
+        *,
+        observed_reliability: float,
+        distorted: bool,
+        contradictory: bool,
+        notes: list[str],
+    ) -> SignalDelivery:
 
         return SignalDelivery(
             signal_id=signal.signal_id,
@@ -241,14 +350,14 @@ class PrototypeInfoChannel:
             arrived_turn=world_state.turn_number,
             channel=signal.channel,
             payload_type=signal.payload_type,
-            observed_content=content,
-            observed_reliability=reliability,
+            observed_content=signal.content,
+            observed_reliability=observed_reliability,
             visibility=signal.visibility,
             classification=signal.classification,
             distortion_applied=distorted,
             contradiction_applied=contradictory,
             leak_applied=bool(signal.metadata.get("leaked_from_signal_id")),
-            delivery_notes=notes,
+            delivery_notes=list(notes),
         )
 
     def _delay_if_needed(
@@ -311,6 +420,21 @@ class PrototypeInfoChannel:
                 f"Rumor circulating about undisclosed activity from {signal.source_entity_id}.",
             )
         )
+        metadata: dict[str, str | int | float | bool] = {
+            "leaked_from_signal_id": signal.signal_id,
+            "info_channel_delay_applied": True,
+            "source_channel": signal.channel.value,
+        }
+        for key in [
+            "action_id",
+            "capability_id",
+            "backchannel_thread_id",
+            "direct_backchannel_message",
+            "formal_backchannel_message",
+            "formal_backchannel_response",
+        ]:
+            if key in signal.metadata:
+                metadata[key] = signal.metadata[key]
         return Signal(
             signal_id=f"leak_{signal.signal_id}",
             source_entity_id="info_channel",
@@ -328,10 +452,7 @@ class PrototypeInfoChannel:
             distortion_risk=0.15,
             urgency=signal.urgency,
             classification="rumor",
-            metadata={
-                "leaked_from_signal_id": signal.signal_id,
-                "info_channel_delay_applied": True,
-            },
+            metadata=metadata,
         )
 
     def _append_public_signal(self, world_state: WorldStateV2, signal: Signal) -> TimelineEntry:

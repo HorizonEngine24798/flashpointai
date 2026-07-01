@@ -5,23 +5,36 @@ from crisis_room.llm.llama_cpp_client import LlamaCppServerClient
 from crisis_room.llm.scripted_client import ScriptedLLMClient
 from crisis_room.llm.task_contracts import (
     AARSummary,
+    AdvisorCouncilResponse,
     AdvisorResponse,
+    BackchannelAvailabilityCheck,
+    BackchannelCounterpartResponse,
+    BackchannelStateChange,
     EventCandidate,
+    EventCreatorResponse,
     FactionDecision,
+    FactionTurnResponse,
     IntentCompilation,
     InternalDebate,
     InternationalPressure,
     MultiIntentCompilation,
     PerceptionUpdate,
     PublicBrief,
+    SignalDistortionResponse,
 )
 
 __all__ = [
     "AARSummary",
+    "AdvisorCouncilResponse",
     "AdvisorResponse",
+    "BackchannelAvailabilityCheck",
+    "BackchannelCounterpartResponse",
+    "BackchannelStateChange",
     "EventCandidate",
+    "EventCreatorResponse",
     "FakeLLMClient",
     "FactionDecision",
+    "FactionTurnResponse",
     "IntentCompilation",
     "InternalDebate",
     "InternationalPressure",
@@ -33,4 +46,5 @@ __all__ = [
     "PerceptionUpdate",
     "PublicBrief",
     "ScriptedLLMClient",
+    "SignalDistortionResponse",
 ]

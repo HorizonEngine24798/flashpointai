@@ -33,8 +33,10 @@ def test_turn_orchestrator_runs_full_fake_agent_turn_without_live_llm() -> None:
         {
             "dialogue.us_excomm.advisor_response": {
                 "answer": "Use a public line only if a private exit remains open.",
+                "council_summary": "State favors a warning only with a private exit.",
                 "advisor_views": [
                     {
+                        "advisor_id": "state",
                         "advisor_name": "State",
                         "stance": "keep the channel alive",
                         "reasoning": "The new backchannel update creates room for a controlled warning.",
@@ -42,14 +44,19 @@ def test_turn_orchestrator_runs_full_fake_agent_turn_without_live_llm() -> None:
                     }
                 ],
                 "risk_warnings": ["Public rhetoric can corner both sides."],
+                "suggested_capability_ids": [
+                    "cuba_public_withdrawal_demand",
+                    "cuba_open_kremlin_channel",
+                ],
                 "suggested_action_ids": [
-                    "public_demand_withdrawal",
-                    "private_kremlin_backchannel",
+                    "public_statement",
+                    "private_diplomacy",
                 ],
             },
             "gamemaster.us_excomm.intent_compilation": {
                 "accepted": True,
-                "action_id": "public_demand_withdrawal",
+                "action_id": "public_statement",
+                "capability_id": "cuba_public_withdrawal_demand",
                 "target_ids": ["soviet_presidium"],
                 "channel": "public",
                 "intent_summary": "Demand removal of Soviet offensive missiles from Cuba.",
@@ -71,13 +78,15 @@ def test_turn_orchestrator_runs_full_fake_agent_turn_without_live_llm() -> None:
                     {
                         "narrative_id": "hold_line",
                         "argument": "Do not concede under pressure.",
-                        "preferred_action_id": "soviet_public_defiance",
+                        "preferred_action_id": "public_statement",
+                        "preferred_capability_id": "soviet_defiance_statement",
                         "perceived_risk": 0.7,
                     },
                     {
                         "narrative_id": "settlement",
                         "argument": "Probe a private off-ramp before rhetoric hardens.",
-                        "preferred_action_id": "soviet_probe_compromise",
+                        "preferred_action_id": "private_diplomacy",
+                        "preferred_capability_id": "soviet_compromise_probe",
                         "target_entity_ids": ["us_excomm"],
                         "perceived_risk": 0.35,
                     },
@@ -86,7 +95,8 @@ def test_turn_orchestrator_runs_full_fake_agent_turn_without_live_llm() -> None:
                 "dominant_narrative_id": "settlement",
             },
             "faction.soviet_presidium.faction_decision": {
-                "action_id": "soviet_probe_compromise",
+                "action_id": "private_diplomacy",
+                "capability_id": "soviet_compromise_probe",
                 "target_ids": ["us_excomm"],
                 "channel": "backchannel",
                 "intent_summary": "Privately ask whether reciprocal restraint is still possible.",
@@ -109,7 +119,8 @@ def test_turn_orchestrator_runs_full_fake_agent_turn_without_live_llm() -> None:
                     {
                         "narrative_id": "defiant",
                         "argument": "Raise air defense readiness so Cuba cannot be ignored.",
-                        "preferred_action_id": "cuban_air_defense_alert",
+                        "preferred_action_id": "military_posture",
+                        "preferred_capability_id": "cuba_air_defense_alert",
                         "target_entity_ids": ["us_excomm"],
                         "perceived_risk": 0.65,
                     }
@@ -118,7 +129,8 @@ def test_turn_orchestrator_runs_full_fake_agent_turn_without_live_llm() -> None:
                 "dominant_narrative_id": "defiant",
             },
             "faction.cuba.faction_decision": {
-                "action_id": "cuban_air_defense_alert",
+                "action_id": "military_posture",
+                "capability_id": "cuba_air_defense_alert",
                 "target_ids": ["us_excomm"],
                 "channel": "military",
                 "intent_summary": "Raise Cuban air defense alert against feared invasion.",
@@ -141,7 +153,8 @@ def test_turn_orchestrator_runs_full_fake_agent_turn_without_live_llm() -> None:
                     {
                         "narrative_id": "solidarity",
                         "argument": "Support Washington while demanding disciplined consultation.",
-                        "preferred_action_id": "nato_reassurance_request",
+                        "preferred_action_id": "private_diplomacy",
+                        "preferred_capability_id": "nato_reassurance_pressure",
                         "target_entity_ids": ["us_excomm"],
                         "perceived_risk": 0.42,
                     }
@@ -150,7 +163,8 @@ def test_turn_orchestrator_runs_full_fake_agent_turn_without_live_llm() -> None:
                 "dominant_narrative_id": "solidarity",
             },
             "faction.nato_allies.faction_decision": {
-                "action_id": "nato_reassurance_request",
+                "action_id": "private_diplomacy",
+                "capability_id": "nato_reassurance_pressure",
                 "target_ids": ["us_excomm"],
                 "channel": "private_diplomatic",
                 "intent_summary": "Privately ask Washington for consultation before the next public move.",
@@ -194,6 +208,7 @@ def test_turn_orchestrator_runs_full_fake_agent_turn_without_live_llm() -> None:
     )
     orchestrator = TurnOrchestrator(
         action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
         llm_client=fake_llm,
     )
 
@@ -213,9 +228,9 @@ def test_turn_orchestrator_runs_full_fake_agent_turn_without_live_llm() -> None:
     )
     assert "A due backchannel update reaches EXCOMM" in dialogue_prompt
     assert result.dialogue_response is not None
-    assert result.dialogue_response.suggested_action_ids == [
-        "public_demand_withdrawal",
-        "private_kremlin_backchannel",
+    assert result.dialogue_response.suggested_capability_ids == [
+        "cuba_public_withdrawal_demand",
+        "cuba_open_kremlin_channel",
     ]
     assert not result.player_compilation.rejected
     assert set(result.agent_outputs) == {
@@ -227,21 +242,31 @@ def test_turn_orchestrator_runs_full_fake_agent_turn_without_live_llm() -> None:
     assert result.agent_outputs["soviet_presidium"].action_package is not None
     assert result.event_output is not None
     assert result.event_output.perception_summary.startswith("Reconnaissance Confusion")
+    media_entry = result.event_output.public_timeline_delta[0]
+    assert media_entry.source == "event_creator"
+    assert media_entry.title == "Reconnaissance Confusion"
+    assert any(
+        entry.entry_id == media_entry.entry_id
+        for entry in result.world_state.public_timeline.entries
+    )
+    assert result.aftermath_report.media_headlines == [
+        f"{media_entry.title}: {media_entry.summary}"
+    ]
     assert {
-        action.action_id for action in result.deterministic_result.accepted_actions
+        action.mechanical_id for action in result.deterministic_result.accepted_actions
     } == {
-        "public_demand_withdrawal",
-        "soviet_probe_compromise",
-        "cuban_air_defense_alert",
-        "nato_reassurance_request",
+        "cuba_public_withdrawal_demand",
+        "soviet_compromise_probe",
+        "cuba_air_defense_alert",
+        "nato_reassurance_pressure",
     }
     assert len(result.final_routing_result.deliveries) >= 8
     assert result.world_state.pending_signals == []
     assert result.world_state.actors["us_excomm"].inbox
     assert result.world_state.actors["soviet_presidium"].resources["diplomatic_flexibility"] == 2
     assert result.world_state.actors["us_excomm"].resources["political_capital"] == 6
-    assert len(result.debug_transcript.llm_calls) == 13
     assert result.debug_transcript.rendered_text.startswith("ORCHESTRATED TURN DEBUG")
+    assert "media headline: Reconnaissance Confusion" in result.debug_transcript.rendered_text
     assert result.debug_transcript.model_dump(mode="json")["scenario_id"] == (
         "cuban_missile_crisis_1962"
     )

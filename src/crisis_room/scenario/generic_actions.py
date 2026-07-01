@@ -1,0 +1,115 @@
+from __future__ import annotations
+
+from crisis_room.engine.actions import ActionCategory, ActionDefinition
+from crisis_room.state.signals import PayloadType, SignalChannel
+
+
+def generic_action_catalog() -> list[ActionDefinition]:
+    return [
+        ActionDefinition(
+            action_id="public_statement",
+            title="Public Statement",
+            category=ActionCategory.INFORMATION,
+            actor_types_allowed=["any"],
+            targets_allowed=["any"],
+            channels_allowed=[SignalChannel.PUBLIC, SignalChannel.MEDIA],
+            information_outputs=[PayloadType.PUBLIC_STATEMENT],
+            prompt_hints=["Use for public demands, warnings, denials, or reassurance."],
+        ),
+        ActionDefinition(
+            action_id="private_diplomacy",
+            title="Private Diplomacy",
+            category=ActionCategory.DIPLOMATIC,
+            actor_types_allowed=["any"],
+            targets_allowed=["any"],
+            channels_allowed=[
+                SignalChannel.PRIVATE_DIPLOMATIC,
+                SignalChannel.BACKCHANNEL,
+            ],
+            information_outputs=[PayloadType.PRIVATE_DIPLOMATIC_MESSAGE],
+            prompt_hints=["Use for private offers, probes, guarantees, or allied consultations."],
+        ),
+        ActionDefinition(
+            action_id="backchannel_message",
+            title="Backchannel Message",
+            category=ActionCategory.DIPLOMATIC,
+            actor_types_allowed=["any"],
+            targets_allowed=["any"],
+            channels_allowed=[SignalChannel.BACKCHANNEL],
+            information_outputs=[PayloadType.BACKCHANNEL_MESSAGE],
+            prompt_hints=["Use for a direct message inside an existing private thread."],
+        ),
+        ActionDefinition(
+            action_id="military_posture",
+            title="Military Posture",
+            category=ActionCategory.MILITARY,
+            actor_types_allowed=["any"],
+            targets_allowed=["any"],
+            channels_allowed=[SignalChannel.MILITARY, SignalChannel.PUBLIC],
+            information_outputs=[PayloadType.MILITARY_MOVEMENT_OBSERVATION],
+            prompt_hints=["Use for readiness, alerts, cordons, and military preparation."],
+        ),
+        ActionDefinition(
+            action_id="reconnaissance",
+            title="Reconnaissance",
+            category=ActionCategory.INTELLIGENCE,
+            actor_types_allowed=["any"],
+            targets_allowed=["any"],
+            channels_allowed=[SignalChannel.INTEL, SignalChannel.MILITARY],
+            information_outputs=[PayloadType.INTEL_REPORT],
+            prompt_hints=["Use for intelligence collection and situational confirmation."],
+        ),
+        ActionDefinition(
+            action_id="covert_operation",
+            title="Covert Operation",
+            category=ActionCategory.INTELLIGENCE,
+            actor_types_allowed=["any"],
+            targets_allowed=["any"],
+            channels_allowed=[SignalChannel.INTEL, SignalChannel.BACKCHANNEL],
+            prompt_hints=["Use for deniable pressure or clandestine support at scenario scale."],
+        ),
+        ActionDefinition(
+            action_id="information_operation",
+            title="Information Operation",
+            category=ActionCategory.INFORMATION,
+            actor_types_allowed=["any"],
+            targets_allowed=["any"],
+            channels_allowed=[SignalChannel.PUBLIC, SignalChannel.MEDIA, SignalChannel.RUMOR],
+            prompt_hints=["Use for narrative pressure, leaks, or perception management."],
+        ),
+        ActionDefinition(
+            action_id="inspection_offer",
+            title="Inspection Offer",
+            category=ActionCategory.DIPLOMATIC,
+            actor_types_allowed=["any"],
+            targets_allowed=["any"],
+            channels_allowed=[SignalChannel.PRIVATE_DIPLOMATIC, SignalChannel.PUBLIC],
+            prompt_hints=["Use for verification, monitored removal, or inspection access."],
+        ),
+        ActionDefinition(
+            action_id="third_party_mediation",
+            title="Third-Party Mediation",
+            category=ActionCategory.DIPLOMATIC,
+            actor_types_allowed=["any"],
+            targets_allowed=["any"],
+            channels_allowed=[
+                SignalChannel.PRIVATE_DIPLOMATIC,
+                SignalChannel.PUBLIC,
+                SignalChannel.GAMEMASTER,
+            ],
+            prompt_hints=["Use for UN, OAS, neutral, or allied mediation pressure."],
+        ),
+        ActionDefinition(
+            action_id="military_deconfliction",
+            title="Military Deconfliction",
+            category=ActionCategory.MILITARY,
+            actor_types_allowed=["any"],
+            targets_allowed=["any"],
+            channels_allowed=[
+                SignalChannel.MILITARY,
+                SignalChannel.PRIVATE_DIPLOMATIC,
+                SignalChannel.BACKCHANNEL,
+            ],
+            prompt_hints=["Use for rules of engagement, stand-down lines, or incident control."],
+        ),
+    ]

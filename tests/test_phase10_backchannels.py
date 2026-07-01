@@ -6,13 +6,16 @@ from uuid import uuid4
 from crisis_room.agents.context import build_visible_context
 from crisis_room.app.backchannels import (
     backchannel_thread_id,
+    prepare_backchannel_message,
     send_backchannel_message,
     update_backchannel_threads,
 )
 from crisis_room.app.debug_sessions import DebugSessionRecorder, load_debug_session
 from crisis_room.app.presentation import build_turn_briefing
 from crisis_room.app.turn_orchestrator import TurnOrchestrator
+from crisis_room.app.tui import _send_backchannel_message
 from crisis_room.engine.adjudication import DeterministicTurnResult
+from crisis_room.llm.contracts import ChatRole, FakeLLMClient
 from crisis_room.llm.scripted_client import ScriptedLLMClient
 from crisis_room.scenario.schema import build_cuban_missile_crisis_1962_scenario
 from crisis_room.state.backchannels import (
@@ -28,6 +31,7 @@ def test_backchannel_actions_open_and_refresh_persistent_threads() -> None:
     world = scenario.create_initial_world(rng_seed=71)
     orchestrator = TurnOrchestrator(
         action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
         llm_client=ScriptedLLMClient(),
     )
 
@@ -43,6 +47,7 @@ def test_backchannel_actions_open_and_refresh_persistent_threads() -> None:
         result.world_state,
         player_entity_id=scenario.player_entity_id,
         action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
     )
 
     assert result.backchannel_update is not None
@@ -77,7 +82,7 @@ def test_visible_context_includes_bounded_backchannel_excerpt() -> None:
                     turn_number=message_index + 1,
                     sender_entity_id="us_excomm",
                     recipient_entity_ids=[f"counter_{index}"],
-                    action_id="private_kremlin_backchannel",
+                    action_id="cuba_open_kremlin_channel",
                     action_package_id=f"package_{index}_{message_index}",
                     summary=f"message {index}-{message_index}",
                 )
@@ -90,6 +95,7 @@ def test_visible_context_includes_bounded_backchannel_excerpt() -> None:
         world.actors["us_excomm"],
         world,
         action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
         backchannel_thread_limit=2,
         backchannel_record_limit=1,
     )
@@ -108,6 +114,7 @@ def test_direct_backchannel_message_consumes_budget_and_routes_response() -> Non
     world = scenario.create_initial_world(rng_seed=74)
     orchestrator = TurnOrchestrator(
         action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
         llm_client=ScriptedLLMClient(),
     )
     opened = orchestrator.run_turn(
@@ -115,15 +122,53 @@ def test_direct_backchannel_message_consumes_budget_and_routes_response() -> Non
         player_entity_id=scenario.player_entity_id,
         player_intent="open a private Kremlin backchannel for reciprocal restraint",
     )
+    fake_llm = FakeLLMClient(
+        {
+            "backchannel.us_excomm.availability": {
+                "allowed": True,
+                "available": True,
+                "target_entity_id": "soviet_presidium",
+                "target_label": "Soviet Presidium",
+                "reason": "Target has scenario gamestate.",
+                "confidence": 0.9,
+            },
+            "backchannel.soviet_presidium.counterpart_response": {
+                "accepted": True,
+                "response_text": "A private assurance could be discussed.",
+                "stance": "constructive",
+                "trust_delta": 0.04,
+                "leak_risk_delta": 0.01,
+                "relationship_delta": 0.03,
+            },
+            "backchannel.soviet_presidium.state_change": {
+                "memory_note": "EXCOMM used the backchannel to test a private pledge.",
+                "unresolved_thread": "Clarify whether the pledge is public or deniable.",
+                "belief_updates": [
+                    {
+                        "topic": "private_pledge",
+                        "summary": "Washington may be willing to discuss a private assurance.",
+                        "confidence": 0.65,
+                    }
+                ],
+                "trust_delta": 0.03,
+                "leak_risk_delta": 0.01,
+                "relationship_delta": 0.03,
+            },
+        }
+    )
 
     sent = send_backchannel_message(
         opened.world_state,
         player_entity_id=scenario.player_entity_id,
         target_entity_id="soviet_presidium",
+        target_query="Soviet Presidium",
         message_text=(
             "We need a face-saving private exit. Would a non-invasion pledge "
             "make withdrawal possible?"
         ),
+        action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
+        llm_client=fake_llm,
         info_channel=orchestrator.info_channel,
     )
     thread_id = backchannel_thread_id("us_excomm", "soviet_presidium")
@@ -143,17 +188,222 @@ def test_direct_backchannel_message_consumes_budget_and_routes_response() -> Non
         for delivery in sent.world_state.actors["soviet_presidium"].inbox
     )
     assert sent.world_state.relationships["us_excomm->soviet_presidium"]["trust"] > 0
+    assert "private pledge" in sent.world_state.actors["soviet_presidium"].memory_summary
+    assert "private_pledge" in sent.world_state.actors["soviet_presidium"].beliefs.claims
     assert sent.world_state.backchannel_update_history[-1].message_record_ids
+    assert [call.request.label for call in fake_llm.calls] == [
+        "backchannel.us_excomm.availability",
+        "backchannel.soviet_presidium.counterpart_response",
+        "backchannel.soviet_presidium.state_change",
+    ]
 
     second = send_backchannel_message(
         sent.world_state,
         player_entity_id=scenario.player_entity_id,
         target_entity_id="soviet_presidium",
         message_text="One more private note.",
+        action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
+        llm_client=fake_llm,
         info_channel=orchestrator.info_channel,
     )
     assert not second.accepted
     assert "direct message budget is exhausted" in second.errors[0]
+
+
+def test_direct_backchannel_to_target_without_gamestate_is_unavailable() -> None:
+    scenario = build_cuban_missile_crisis_1962_scenario()
+    world = scenario.create_initial_world(rng_seed=740)
+    fake_llm = FakeLLMClient(
+        {
+            "backchannel.us_excomm.availability": {
+                "allowed": True,
+                "available": False,
+                "target_entity_id": "",
+                "target_label": "family member",
+                "reason": "Target has no scenario actor gamestate.",
+                "confidence": 0.85,
+            }
+        }
+    )
+
+    sent = send_backchannel_message(
+        world,
+        player_entity_id=scenario.player_entity_id,
+        target_query="family member",
+        message_text="Tell them I may be late tonight.",
+        action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
+        llm_client=fake_llm,
+    )
+
+    assert not sent.accepted
+    assert not sent.available
+    assert "no scenario actor gamestate" in sent.errors[0]
+    assert sent.world_state.backchannel_threads == {}
+    assert [call.request.label for call in fake_llm.calls] == [
+        "backchannel.us_excomm.availability"
+    ]
+
+
+def test_formal_direct_backchannel_message_uses_counterpart_contract() -> None:
+    scenario = build_cuban_missile_crisis_1962_scenario()
+    world = scenario.create_initial_world(rng_seed=76)
+    thread_id = backchannel_thread_id("us_excomm", "soviet_presidium")
+    world.backchannel_threads[thread_id] = BackchannelThread(
+        thread_id=thread_id,
+        participant_entity_ids=["soviet_presidium", "us_excomm"],
+        player_entity_id="us_excomm",
+        opened_turn=1,
+        last_active_turn=1,
+        expires_turn=3,
+    )
+    fake_llm = FakeLLMClient(
+        {
+            "backchannel.soviet_presidium.counterpart_response": {
+                "accepted": True,
+                "response_text": "A private assurance could be discussed.",
+                "stance": "constructive",
+                "trust_delta": 0.04,
+                "leak_risk_delta": 0.01,
+                "relationship_delta": 0.03,
+            }
+        }
+    )
+
+    preparation = prepare_backchannel_message(
+        world,
+        player_entity_id=scenario.player_entity_id,
+        target_entity_id="soviet_presidium",
+        message_text="Formal: would a non-invasion pledge move missile withdrawal?",
+        action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
+        llm_client=fake_llm,
+    )
+    request = fake_llm.calls[0].request
+    prompt_text = "\n".join(message.content for message in request.messages)
+
+    assert preparation.accepted
+    assert preparation.formal
+    assert preparation.compilation is not None
+    assert request.response_schema_name == "BackchannelCounterpartResponse"
+    assert request.max_tokens == 700
+    assert "BackchannelCounterpartResponse contract:" in prompt_text
+    assert any(message.role == ChatRole.USER for message in request.messages)
+    assert preparation.compilation.action_packages[0].parameters == {
+        "message_text": "would a non-invasion pledge move missile withdrawal?"
+    }
+
+
+def test_formal_direct_backchannel_message_advances_turn_through_pipeline() -> None:
+    scenario = build_cuban_missile_crisis_1962_scenario()
+    world = scenario.create_initial_world(rng_seed=77)
+    thread_id = backchannel_thread_id("us_excomm", "soviet_presidium")
+    world.backchannel_threads[thread_id] = BackchannelThread(
+        thread_id=thread_id,
+        participant_entity_ids=["soviet_presidium", "us_excomm"],
+        player_entity_id="us_excomm",
+        opened_turn=1,
+        last_active_turn=1,
+        expires_turn=3,
+    )
+    llm_client = ScriptedLLMClient()
+    orchestrator = TurnOrchestrator(
+        action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
+        scenario_events=scenario.scenario_events,
+        llm_client=llm_client,
+    )
+    preparation = prepare_backchannel_message(
+        world,
+        player_entity_id=scenario.player_entity_id,
+        target_entity_id="soviet_presidium",
+        message_text="Formal: offer a private non-invasion pledge for withdrawal.",
+        action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
+        llm_client=llm_client,
+    )
+
+    assert preparation.compilation is not None
+    result = orchestrator.run_turn(
+        world,
+        player_entity_id=scenario.player_entity_id,
+        player_intent="direct formal backchannel message",
+        precompiled_player_compilation=preparation.compilation,
+    )
+    thread = result.world_state.backchannel_threads[thread_id]
+
+    assert result.world_state.turn_number == world.turn_number + 1
+    assert any(
+        package.mechanical_id == "cuba_direct_kremlin_message"
+        for package in result.deterministic_result.accepted_actions
+    )
+    assert thread.player_messages_used == 1
+    assert any(
+        record.action_id == "direct_backchannel_response"
+        for record in thread.message_records
+    )
+    assert any(
+        delivery.source_entity_id == "soviet_presidium"
+        and delivery.payload_type.value == "backchannel_message"
+        for delivery in result.final_routing_result.deliveries
+    )
+    assert result.backchannel_update is not None
+    assert result.advisor_update is not None
+
+
+def test_leaked_formal_direct_message_triggers_authored_flash_event() -> None:
+    scenario = build_cuban_missile_crisis_1962_scenario()
+    for capability in scenario.capabilities:
+        if capability.capability_id == "cuba_direct_kremlin_message":
+            capability.signal_leak_risk = 1.0
+    world = scenario.create_initial_world(rng_seed=78)
+    thread_id = backchannel_thread_id("us_excomm", "soviet_presidium")
+    world.backchannel_threads[thread_id] = BackchannelThread(
+        thread_id=thread_id,
+        participant_entity_ids=["soviet_presidium", "us_excomm"],
+        player_entity_id="us_excomm",
+        opened_turn=1,
+        last_active_turn=1,
+        expires_turn=3,
+    )
+    llm_client = ScriptedLLMClient()
+    orchestrator = TurnOrchestrator(
+        action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
+        scenario_events=scenario.scenario_events,
+        llm_client=llm_client,
+    )
+    preparation = prepare_backchannel_message(
+        world,
+        player_entity_id=scenario.player_entity_id,
+        target_entity_id="soviet_presidium",
+        message_text="Formal: discuss a deniable Jupiter trade for withdrawal.",
+        action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
+        llm_client=llm_client,
+    )
+
+    assert preparation.compilation is not None
+    result = orchestrator.run_turn(
+        world,
+        player_entity_id=scenario.player_entity_id,
+        player_intent="direct formal backchannel message",
+        precompiled_player_compilation=preparation.compilation,
+    )
+
+    assert result.scenario_event_result is not None
+    assert "direct_backchannel_message_leak" in {
+        record.event_id for record in result.scenario_event_result.fired_events
+    }
+    assert any(
+        signal.metadata.get("capability_id") == "cuba_direct_kremlin_message"
+        for signal in result.final_routing_result.leaked_signals
+    )
+    assert any(
+        entry.metadata.get("event_id") == "direct_backchannel_message_leak"
+        for entry in result.world_state.public_timeline.entries
+    )
 
 
 def test_backchannel_threads_expire_and_survive_world_hydration() -> None:
@@ -174,6 +424,7 @@ def test_backchannel_threads_expire_and_survive_world_hydration() -> None:
         world,
         deterministic_result=DeterministicTurnResult(world_state=world),
         action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
         player_entity_id=scenario.player_entity_id,
     )
     rehydrated = WorldStateV2.model_validate(world.model_dump(mode="json"))
@@ -214,6 +465,57 @@ def test_direct_backchannel_message_updates_debug_session_world() -> None:
 
     assert loaded.world_state.backchannel_threads[thread_id].player_messages_used == 1
     assert loaded.rendered_log[-1] == "BACKCHANNEL"
+
+
+def test_formal_backchannel_counterpart_call_is_saved_in_debug_session() -> None:
+    scenario = build_cuban_missile_crisis_1962_scenario()
+    world = scenario.create_initial_world(rng_seed=79)
+    thread_id = backchannel_thread_id("us_excomm", "soviet_presidium")
+    world.backchannel_threads[thread_id] = BackchannelThread(
+        thread_id=thread_id,
+        participant_entity_ids=["soviet_presidium", "us_excomm"],
+        player_entity_id="us_excomm",
+        opened_turn=1,
+        last_active_turn=1,
+        expires_turn=3,
+    )
+    orchestrator = TurnOrchestrator(
+        action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
+        scenario_events=scenario.scenario_events,
+        llm_client=ScriptedLLMClient(),
+    )
+    recorder = DebugSessionRecorder(
+        world_state=world,
+        player_entity_id=scenario.player_entity_id,
+        output_dir=_test_output_dir("formal_backchannel_debug"),
+    )
+
+    _send_backchannel_message(
+        world=world,
+        player_id=scenario.player_entity_id,
+        backchannel_text=(
+            "soviet_presidium Formal: offer a private non-invasion pledge "
+            "for missile withdrawal."
+        ),
+        scenario=scenario,
+        orchestrator=orchestrator,
+        recorder=recorder,
+        save_dir=_test_output_dir("formal_backchannel_saves"),
+        debug_mode=False,
+    )
+    loaded = load_debug_session(recorder.path)
+
+    assert loaded.llm_task_records
+    record = loaded.llm_task_records[0]
+    assert record.label == "backchannel.soviet_presidium.counterpart_response"
+    assert record.llm_calls[0].request.response_schema_name == "BackchannelCounterpartResponse"
+    assert record.llm_calls[0].raw_response["response_text"]
+    assert record.llm_calls[0].parsed_response["response_text"]
+    assert any(
+        call.request.label == "backchannel.soviet_presidium.counterpart_response"
+        for call in record.llm_calls
+    )
 
 
 def _test_output_dir(name: str) -> Path:

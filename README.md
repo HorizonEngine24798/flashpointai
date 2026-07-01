@@ -1,35 +1,101 @@
 # Crisis Room Simulation
 
-A text-first political-military crisis room simulator. The default scenario is
-the Cuban Missile Crisis, with the player inhabiting U.S. EXCOMM.
+A local browser-based political-military crisis room simulator. The default
+scenario is the Cuban Missile Crisis, with the player inhabiting U.S. EXCOMM.
 
-## Start The Game
+## Start The GUI
 
-From this repo, run:
+The GUI has two local pieces:
+
+- a Python FastAPI backend that owns the game session and talks to llama.cpp
+- a React/Vite frontend that renders the room-based browser GUI
+
+For day-to-day development, run them in two terminals.
+
+### 1. Start The Backend
+
+Open **Terminal 1** in the repo root and run:
+
+```bash
+conda activate polmil
+python main.py
+```
+
+Expected output includes:
+
+```text
+Crisis Room API: http://127.0.0.1:8000/api/state
+```
+
+Leave this terminal running.
+
+### 3. Start The Frontend
+
+Open **Terminal 2** in the repo root and run:
+
+```bash
+conda activate polmil
+npm run dev --prefix frontend
+```
+
+Expected output includes a local Vite URL, usually:
+
+```text
+http://127.0.0.1:5173
+```
+
+Open that URL in your browser. The GUI opens to `The Crisis Room` start screen.
+Start a new Cuban Missile Crisis scenario to enter the Control Room.
+
+### 4. Stop The GUI
+
+Press `Ctrl+C` in both terminals. If a background backend is still running, find
+and stop it from PowerShell:
 
 ```powershell
+Get-Process python
+Stop-Process -Id <PID>
+```
+
+### What The Backend Does
+
+- loads `config/llama_cpp.local.json`
+- starts `llama-server.exe` when the first LLM-backed action needs it
+- loads the local HauhauCS Qwen3.5 35B uncensored GGUF model
+- uses `http://127.0.0.1:8080/v1` for game LLM calls
+- exposes the game API at `http://127.0.0.1:8000/api/state`
+
+First LLM use can take a while because the model has to load. Logs are written
+under `output/diagnostics/llama_server/`.
+
+## One-Terminal Built GUI
+
+After building the frontend, the Python backend can serve the browser files by
+itself. This is less convenient for active UI editing, but simpler when you just
+want to play.
+
+From the repo root:
+
+```powershell
+cmd /c npm run build --prefix frontend
 C:\Users\User\Miniconda3\Scripts\conda.exe run -n polmil python main.py
 ```
 
-If `conda` is already on your PATH, this is the same thing:
+Then open:
 
-```powershell
-conda run -n polmil python main.py
+```text
+http://127.0.0.1:8000
 ```
 
-That default launch:
+## Terminal TUI
 
-- loads `config/llama_cpp.local.json`
-- starts `llama-server.exe` if the configured server is not already running
-- loads the local HauhauCS Qwen3.5 35B uncensored GGUF model
-- uses `http://127.0.0.1:8080/v1` for game LLM calls
-- saves the session and closes the managed server when you type `QUIT`
+The terminal interface remains available as a fallback:
 
-First startup can take a while because the model has to load. The game prints
-the llama-server log path after startup; logs are written under
-`output/diagnostics/llama_server/`.
+```powershell
+C:\Users\User\Miniconda3\Scripts\conda.exe run -n polmil python main.py tui
+```
 
-## Game Commands
+Legacy commands:
 
 ```text
 ASK <text>      Ask advisors a question
@@ -92,11 +158,9 @@ server_executable    absolute path to llama-server.exe
 server_model_path    absolute path to the Qwen GGUF model
 ```
 
-For offline development without the live model, run:
-
-```powershell
-conda run -n polmil python main.py --llm scripted
-```
+Runtime gameplay uses the live local llama.cpp path. Automated tests may still
+use isolated deterministic doubles so the fast suite does not require a loaded
+model.
 
 ## Development Baseline
 

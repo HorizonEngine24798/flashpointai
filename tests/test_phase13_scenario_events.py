@@ -17,13 +17,14 @@ from crisis_room.state.world import WorldStateV2
 def test_scenario_event_resolver_applies_authored_effects_and_history() -> None:
     scenario = build_cuban_missile_crisis_1962_scenario()
     world = scenario.create_initial_world(rng_seed=101)
-    engine = DeterministicEngineV2(scenario.action_catalog)
+    engine = DeterministicEngineV2(scenario.action_catalog, scenario.capabilities)
     deterministic_result = engine.resolve_actions(
         world,
         [
             ActionPackage(
                 actor_id=scenario.player_entity_id,
-                action_id="announce_quarantine",
+                action_id="military_posture",
+                capability_id="cuba_announce_naval_quarantine",
                 target_ids=["soviet_presidium", "cuba"],
                 channel=SignalChannel.PUBLIC,
                 intent_summary="Announce and prepare a naval quarantine.",
@@ -66,6 +67,7 @@ def test_scenario_events_fire_inside_orchestrated_turn_and_surface_to_player() -
     world = scenario.create_initial_world(rng_seed=102)
     orchestrator = TurnOrchestrator(
         action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
         scenario_events=scenario.scenario_events,
         llm_client=ScriptedLLMClient(),
     )
@@ -80,6 +82,7 @@ def test_scenario_events_fire_inside_orchestrated_turn_and_surface_to_player() -
         result.world_state,
         player_entity_id=scenario.player_entity_id,
         action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
     )
 
     assert result.scenario_event_result is not None
@@ -97,10 +100,11 @@ def test_scenario_events_fire_inside_orchestrated_turn_and_surface_to_player() -
 def test_scenario_event_once_gate_prevents_repeat_fire() -> None:
     scenario = build_cuban_missile_crisis_1962_scenario()
     world = scenario.create_initial_world(rng_seed=103)
-    engine = DeterministicEngineV2(scenario.action_catalog)
+    engine = DeterministicEngineV2(scenario.action_catalog, scenario.capabilities)
     package = ActionPackage(
         actor_id=scenario.player_entity_id,
-        action_id="announce_quarantine",
+        action_id="military_posture",
+        capability_id="cuba_announce_naval_quarantine",
         target_ids=["soviet_presidium", "cuba"],
         channel=SignalChannel.PUBLIC,
         intent_summary="Announce and prepare a naval quarantine.",

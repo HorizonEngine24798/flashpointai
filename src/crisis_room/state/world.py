@@ -8,7 +8,8 @@ from crisis_room.engine.actions import ActionPackage
 from crisis_room.state.advisors import AdvisorCouncilState, AdvisorCouncilUpdate
 from crisis_room.state.backchannels import BackchannelThread, BackchannelThreadUpdate
 from crisis_room.state.beliefs import BeliefState, InternalNarrative
-from crisis_room.state.events import ScenarioEventRecord
+from crisis_room.state.endings import EndingOfferRecord
+from crisis_room.state.events import ScenarioEventChoiceRecord, ScenarioEventRecord
 from crisis_room.state.signals import Signal, SignalDelivery
 from crisis_room.state.timelines import Timeline, TimelineEntry, TimelineScope
 
@@ -60,6 +61,13 @@ class WorldStateV2(BaseModel):
     backchannel_threads: dict[str, BackchannelThread] = Field(default_factory=dict)
     backchannel_update_history: list[BackchannelThreadUpdate] = Field(default_factory=list)
     event_history: list[ScenarioEventRecord] = Field(default_factory=list)
+    pending_event_choices: list[ScenarioEventChoiceRecord] = Field(default_factory=list)
+    ending_offers: list[EndingOfferRecord] = Field(default_factory=list)
+    accepted_ending_id: str = ""
+    accepted_ending_offer_id: str = ""
+    accepted_ending_turn: int | None = Field(default=None, ge=0)
+    final_summary: str = ""
+    ending_reoffer_after_turns: dict[str, int] = Field(default_factory=dict)
     active_commitments: list[str] = Field(default_factory=list)
     pending_actions: list[ActionPackage] = Field(default_factory=list)
     pending_signals: list[Signal] = Field(default_factory=list)

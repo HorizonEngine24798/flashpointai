@@ -13,6 +13,7 @@ def test_batch_validation_reports_common_multi_action_conflicts() -> None:
     scenario = build_cuban_missile_crisis_1962_scenario()
     world = scenario.create_initial_world(rng_seed=81)
     world.actors["us_excomm"].resources["political_capital"] = 2
+    world.actors["soviet_presidium"].resources["diplomatic_flexibility"] = 1
 
     report = build_batch_validation_report(
         world,
@@ -20,7 +21,8 @@ def test_batch_validation_reports_common_multi_action_conflicts() -> None:
             ActionPackage(
                 package_id="pkg_quarantine_a",
                 actor_id="us_excomm",
-                action_id="announce_quarantine",
+                action_id="military_posture",
+                capability_id="cuba_announce_naval_quarantine",
                 target_ids=["soviet_presidium"],
                 channel=SignalChannel.PUBLIC,
                 intent_summary="Prepare public naval pressure.",
@@ -28,7 +30,8 @@ def test_batch_validation_reports_common_multi_action_conflicts() -> None:
             ActionPackage(
                 package_id="pkg_quarantine_b",
                 actor_id="us_excomm",
-                action_id="announce_quarantine",
+                action_id="military_posture",
+                capability_id="cuba_announce_naval_quarantine",
                 target_ids=["soviet_presidium"],
                 channel=SignalChannel.PUBLIC,
                 intent_summary="Duplicate the same prepared pressure.",
@@ -36,7 +39,8 @@ def test_batch_validation_reports_common_multi_action_conflicts() -> None:
             ActionPackage(
                 package_id="pkg_jupiter",
                 actor_id="us_excomm",
-                action_id="secret_jupiter_trade",
+                action_id="private_diplomacy",
+                capability_id="cuba_secret_jupiter_trade",
                 target_ids=["soviet_presidium"],
                 channel=SignalChannel.BACKCHANNEL,
                 intent_summary="Float a private Jupiter trade.",
@@ -44,31 +48,35 @@ def test_batch_validation_reports_common_multi_action_conflicts() -> None:
             ActionPackage(
                 package_id="pkg_fallback",
                 actor_id="us_excomm",
-                action_id="offer_non_invasion_pledge",
+                action_id="private_diplomacy",
+                capability_id="cuba_offer_non_invasion_pledge",
                 target_ids=["soviet_presidium"],
                 channel=SignalChannel.PRIVATE_DIPLOMATIC,
                 intent_summary="Offer a pledge only if pressure fails.",
                 fallback_condition="if the quarantine does not move Moscow",
             ),
             ActionPackage(
-                package_id="pkg_soviet_quarantine_a",
+                package_id="pkg_soviet_probe_a",
                 actor_id="soviet_presidium",
-                action_id="announce_quarantine",
+                action_id="private_diplomacy",
+                capability_id="soviet_compromise_probe",
                 target_ids=["us_excomm"],
-                channel=SignalChannel.PUBLIC,
-                intent_summary="Non-player duplicate setup.",
+                channel=SignalChannel.BACKCHANNEL,
+                intent_summary="Non-player compromise probe.",
             ),
             ActionPackage(
-                package_id="pkg_soviet_quarantine_b",
+                package_id="pkg_soviet_probe_b",
                 actor_id="soviet_presidium",
-                action_id="announce_quarantine",
+                action_id="private_diplomacy",
+                capability_id="soviet_compromise_probe",
                 target_ids=["us_excomm"],
-                channel=SignalChannel.PUBLIC,
-                intent_summary="Non-player duplicate setup again.",
+                channel=SignalChannel.BACKCHANNEL,
+                intent_summary="Non-player compromise probe again.",
             ),
         ],
         scenario.action_catalog,
         player_entity_id=scenario.player_entity_id,
+        capabilities=scenario.capabilities,
     )
 
     player_warnings = [
@@ -77,7 +85,6 @@ def test_batch_validation_reports_common_multi_action_conflicts() -> None:
     player_codes = {warning.code for warning in player_warnings}
 
     assert {
-        "duplicate_cooldown_action",
         "fallback_submitted_now",
         "missing_backchannel_thread",
         "public_covert_tension",
@@ -95,6 +102,7 @@ def test_turn_orchestrator_surfaces_player_batch_warnings() -> None:
     world = scenario.create_initial_world(rng_seed=82)
     orchestrator = TurnOrchestrator(
         action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
         llm_client=ScriptedLLMClient(),
     )
 
