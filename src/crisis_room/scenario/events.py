@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import hashlib
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
-from crisis_room.agents.info_channel import RoutingResult
 from crisis_room.engine.adjudication import DeterministicTurnResult
 from crisis_room.engine.clocks import NumericChange, apply_numeric_effects, clamp
 from crisis_room.llm.task_contracts import EventCandidate, SignalCandidate
@@ -18,6 +18,9 @@ from crisis_room.state.events import (
 from crisis_room.state.signals import PayloadType, Signal, SignalChannel, SignalVisibility
 from crisis_room.state.timelines import TimelineEntry, TimelineScope
 from crisis_room.state.world import WorldStateV2
+
+if TYPE_CHECKING:
+    from crisis_room.agents.info_channel import RoutingResult
 
 
 class ScenarioEventTrigger(BaseModel):

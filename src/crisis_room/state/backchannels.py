@@ -47,6 +47,21 @@ class BackchannelThread(BaseModel):
         return max(0, self.max_player_messages - used)
 
 
+def backchannel_message_leak_risk(
+    thread: BackchannelThread,
+    *,
+    base_leak_risk: float | None = None,
+) -> float:
+    # ponytail: trust is the channel health signal; tune a richer model after playtests.
+    leak_risk = (
+        thread.leak_risk
+        if base_leak_risk is None
+        else max(base_leak_risk, thread.leak_risk)
+    )
+    trust = max(0.0, min(1.0, thread.trust_level))
+    return round(max(0.0, min(1.0, leak_risk * (2.0 - trust))), 10)
+
+
 class BackchannelThreadUpdate(BaseModel):
     turn_number: int = Field(ge=0)
     opened_thread_ids: list[str] = Field(default_factory=list)

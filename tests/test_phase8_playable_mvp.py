@@ -13,8 +13,18 @@ from crisis_room.app.presentation import (
 from crisis_room.app.turn_orchestrator import TurnOrchestrator
 from crisis_room.app.tui import _format_runtime_error
 from crisis_room.llm.diagnostics import LlamaCppJSONError
+from crisis_room.llm.contracts import LLMCallRecord
 from crisis_room.llm.scripted_client import ScriptedLLMClient
 from crisis_room.scenario.schema import build_cuban_missile_crisis_1962_scenario
+
+EXPECTED_TURN_GAMEPLAY_LABELS = [
+    "gamemaster.us_excomm.intent_compilation",
+    "faction.soviet_presidium.turn",
+    "faction.cuba.turn",
+    "faction.nato_allies.turn",
+    "international.international.pressure",
+    "event_creator.event_creator.media_event_turn",
+]
 
 
 def test_scripted_client_makes_cuba_scenario_playable_without_live_llm() -> None:
@@ -56,8 +66,12 @@ def test_scripted_client_makes_cuba_scenario_playable_without_live_llm() -> None
         "cuba_air_defense_alert",
         "nato_reassurance_pressure",
     }
-    assert len(first.debug_transcript.llm_calls) == 6
-    assert len(second.debug_transcript.llm_calls) == 6
+    assert _gameplay_call_labels(first.debug_transcript.llm_calls) == (
+        EXPECTED_TURN_GAMEPLAY_LABELS
+    )
+    assert _gameplay_call_labels(second.debug_transcript.llm_calls) == (
+        EXPECTED_TURN_GAMEPLAY_LABELS
+    )
     assert second.world_state.actors["us_excomm"].inbox
 
     recorder = DebugSessionRecorder(
@@ -283,3 +297,11 @@ def _test_output_dir(name: str) -> Path:
     path = Path("output") / "test_debug_sessions" / f"{name}_{uuid4().hex}"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _gameplay_call_labels(calls: list[LLMCallRecord]) -> list[str]:
+    return [
+        call.request.label
+        for call in calls
+        if not call.request.label.startswith("info_channel.")
+    ]

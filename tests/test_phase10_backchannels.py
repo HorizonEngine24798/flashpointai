@@ -4,7 +4,9 @@ from pathlib import Path
 from uuid import uuid4
 
 from crisis_room.agents.context import build_visible_context
+from crisis_room.agents.event_creator import EventCreatorAgent
 from crisis_room.app.backchannels import (
+    _backchannel_message_leak_risk,
     backchannel_thread_id,
     prepare_backchannel_message,
     send_backchannel_message,
@@ -209,6 +211,92 @@ def test_direct_backchannel_message_consumes_budget_and_routes_response() -> Non
     )
     assert not second.accepted
     assert "direct message budget is exhausted" in second.errors[0]
+
+
+def test_direct_backchannel_leak_depends_on_health_and_reaches_event_creator() -> None:
+    scenario = build_cuban_missile_crisis_1962_scenario()
+    world = scenario.create_initial_world(rng_seed=741)
+    thread_id = backchannel_thread_id("us_excomm", "soviet_presidium")
+    low_health_thread = BackchannelThread(
+        thread_id=thread_id,
+        participant_entity_ids=["soviet_presidium", "us_excomm"],
+        player_entity_id="us_excomm",
+        opened_turn=1,
+        last_active_turn=1,
+        expires_turn=3,
+        trust_level=0.0,
+        leak_risk=1.0,
+    )
+    world.backchannel_threads[thread_id] = low_health_thread
+    leak_probe = low_health_thread.model_copy(update={"leak_risk": 0.2})
+    high_health_probe = leak_probe.model_copy(update={"trust_level": 1.0})
+    assert _backchannel_message_leak_risk(leak_probe) > _backchannel_message_leak_risk(
+        high_health_probe
+    )
+
+    fake_llm = FakeLLMClient(
+        {
+            "backchannel.us_excomm.availability": {
+                "allowed": True,
+                "available": True,
+                "target_entity_id": "soviet_presidium",
+                "target_label": "Soviet Presidium",
+                "reason": "Target has scenario gamestate.",
+                "confidence": 0.9,
+            },
+            "backchannel.soviet_presidium.counterpart_response": {
+                "accepted": True,
+                "response_text": "Keep this channel quiet.",
+                "stance": "guarded",
+                "trust_delta": 0.0,
+                "leak_risk_delta": 0.0,
+                "relationship_delta": 0.0,
+            },
+            "backchannel.soviet_presidium.state_change": {
+                "trust_delta": 0.0,
+                "leak_risk_delta": 0.0,
+                "relationship_delta": 0.0,
+            },
+        }
+    )
+
+    sent = send_backchannel_message(
+        world,
+        player_entity_id=scenario.player_entity_id,
+        target_query="Soviet Presidium",
+        message_text="Use the quiet channel before public positions harden.",
+        action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
+        llm_client=fake_llm,
+    )
+
+    assert sent.accepted
+    assert sent.routing_result is not None
+    assert sent.routing_result.leaked_signals
+    assert any(
+        "direct backchannel message moved between" in entry.summary
+        for entry in sent.world_state.public_timeline.entries
+    )
+
+    event_llm = FakeLLMClient(
+        {
+            "event_creator.event_creator.media_event_turn": {
+                "public_brief": {
+                    "headline": "Backchannel Rumor",
+                    "summary": "Reports describe a private channel rumor.",
+                    "public_risk_read": "elevated",
+                },
+                "event_candidate": None,
+                "major_event_relevant": False,
+                "editorial_notes": ["Public rumor is visible."],
+            }
+        }
+    )
+    EventCreatorAgent().create_candidate(sent.world_state, llm_client=event_llm)
+    event_prompt = "\n".join(
+        message.content for message in event_llm.calls[0].request.messages
+    )
+    assert "direct backchannel message moved between" in event_prompt
 
 
 def test_direct_backchannel_to_target_without_gamestate_is_unavailable() -> None:

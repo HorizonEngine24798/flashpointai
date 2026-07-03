@@ -94,8 +94,11 @@ def test_live_llm_one_turn_orchestrator_records_all_contracts() -> None:
         client.close()
 
     calls = result.debug_transcript.llm_calls
+    gameplay_calls = [
+        call for call in calls if not call.request.label.startswith("info_channel.")
+    ]
     assert result.world_state.turn_number == 2
-    assert [call.request.label for call in calls] == EXPECTED_ONE_TURN_LABELS
+    assert [call.request.label for call in gameplay_calls] == EXPECTED_ONE_TURN_LABELS
     assert all(call.raw_response is not None for call in calls)
     assert all(call.parsed_response is not None for call in calls)
     assert not result.player_compilation.rejected

@@ -21,6 +21,7 @@ from crisis_room.engine.resources import (
     check_resources,
     merge_requirements,
 )
+from crisis_room.state.backchannels import backchannel_message_leak_risk
 from crisis_room.state.signals import (
     PayloadType,
     Signal,
@@ -567,6 +568,18 @@ class DeterministicEngineV2:
             "action_id": action_package.action_id,
             "capability_id": definition.capability_id or "",
         }
+        leak_risk = definition.signal_leak_risk
+        thread_id = action_package.metadata.get("backchannel_thread_id")
+        if action_package.metadata.get("direct_backchannel_message") and isinstance(
+            thread_id,
+            str,
+        ):
+            thread = world_state.backchannel_threads.get(thread_id)
+            if thread is not None:
+                leak_risk = backchannel_message_leak_risk(
+                    thread,
+                    base_leak_risk=leak_risk,
+                )
         for key in [
             "backchannel_thread_id",
             "direct_backchannel_message",
@@ -590,7 +603,7 @@ class DeterministicEngineV2:
             intended_arrival_turn=world_state.turn_number,
             visibility=visibility,
             reliability=definition.signal_reliability,
-            leak_risk=definition.signal_leak_risk,
+            leak_risk=leak_risk,
             distortion_risk=definition.signal_distortion_risk,
             urgency=action_package.commitment_level,
             classification="public" if visibility == SignalVisibility.PUBLIC else "confidential",

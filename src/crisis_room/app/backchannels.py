@@ -47,6 +47,7 @@ from crisis_room.state.backchannels import (
     BackchannelThread,
     BackchannelThreadStatus,
     BackchannelThreadUpdate,
+    backchannel_message_leak_risk,
 )
 from crisis_room.state.beliefs import BeliefClaim
 from crisis_room.state.signals import PayloadType, Signal, SignalChannel, SignalVisibility
@@ -552,7 +553,11 @@ def build_formal_backchannel_response_signals(
         thread = world_state.backchannel_threads.get(thread_id)
         leak_delta = _metadata_float(package.metadata, "counterpart_leak_risk_delta")
         leak_risk = clamp(
-            (thread.leak_risk if thread is not None else DEFAULT_BACKCHANNEL_LEAK_RISK)
+            (
+                backchannel_message_leak_risk(thread)
+                if thread is not None
+                else DEFAULT_BACKCHANNEL_LEAK_RISK
+            )
             + leak_delta
         )
         outgoing_signal = outgoing_by_package.get(package.package_id)
@@ -1271,6 +1276,10 @@ def _direct_message_signal(
     metadata: dict[str, str | int | float | bool] = {
         "backchannel_thread_id": thread.thread_id,
         "direct_backchannel_message": True,
+        "leak_summary": _direct_message_leak_summary(
+            sender_entity_id,
+            recipient_entity_id,
+        ),
     }
     if response_to_signal_id:
         metadata["response_to_signal_id"] = response_to_signal_id
@@ -1287,7 +1296,7 @@ def _direct_message_signal(
         visibility=SignalVisibility.COVERT,
         reliability=max(DIRECT_MESSAGE_MIN_RELIABILITY, thread.trust_level),
         deniability=DIRECT_MESSAGE_DENIABILITY,
-        leak_risk=thread.leak_risk,
+        leak_risk=backchannel_message_leak_risk(thread),
         distortion_risk=DIRECT_MESSAGE_DISTORTION_RISK,
         urgency=DIRECT_MESSAGE_URGENCY,
         classification="confidential",
