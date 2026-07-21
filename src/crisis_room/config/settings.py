@@ -32,7 +32,6 @@ class LlamaCppSettings(BaseModel):
     max_new_tokens: int = Field(default=8192, ge=1)
     token_estimation_chars_per_token: float = Field(default=3.0, gt=0.0)
     json_retries: int = Field(default=1, ge=0)
-    enable_thinking: bool = False
     manage_server: bool = True
     server_executable: str = ""
     server_model_path: str = ""
@@ -122,6 +121,8 @@ def _llama_env_overrides() -> dict[str, Any]:
         "MAX_NEW_TOKENS": "max_new_tokens",
         "JSON_RETRIES": "json_retries",
         "REQUEST_TIMEOUT_SECONDS": "request_timeout_seconds",
+        "TEMPERATURE": "temperature",
+        "TOP_P": "top_p",
     }
     overrides: dict[str, Any] = {}
     for env_suffix, field_name in field_map.items():

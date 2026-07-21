@@ -9,7 +9,7 @@ from crisis_room.scenario.endings import (
     reject_ending_offer,
     render_active_ending_offers,
 )
-from crisis_room.scenario.schema import build_cuban_missile_crisis_1962_scenario
+from crisis_room.scenario.cuba import build_cuban_missile_crisis_1962_scenario
 from crisis_room.state.events import ScenarioEventStatus
 from crisis_room.state.world import WorldStateV2
 
@@ -25,8 +25,9 @@ def test_ending_evaluator_offers_scenario_ending_as_event_record() -> None:
             capabilities=scenario.capabilities,
         )
     )
-    world.truth_metrics["diplomatic_offramp"] = 0.76
+    world.truth_metrics["diplomatic_offramp"] = 0.84
     world.hidden_clocks["nuclear_escalation"] = 0.44
+    world.active_commitments.append("settlement_framework_offered")
 
     evaluation = evaluate_ending_events(
         world,
@@ -59,8 +60,9 @@ def test_ending_evaluator_offers_scenario_ending_as_event_record() -> None:
 def test_rejected_ending_uses_three_turn_reoffer_delay() -> None:
     scenario = build_cuban_missile_crisis_1962_scenario()
     world = scenario.create_initial_world(rng_seed=162)
-    world.truth_metrics["diplomatic_offramp"] = 0.78
+    world.truth_metrics["diplomatic_offramp"] = 0.84
     world.hidden_clocks["nuclear_escalation"] = 0.4
+    world.active_commitments.append("settlement_framework_offered")
     offered = evaluate_ending_events(
         world,
         scenario.scenario_endings,
@@ -95,6 +97,25 @@ def test_rejected_ending_uses_three_turn_reoffer_delay() -> None:
     )
     assert reoffered.offer_record is not None
     assert reoffered.offer_record.ending_id == "settlement_reached"
+
+
+def test_settlement_requires_a_player_created_framework() -> None:
+    scenario = build_cuban_missile_crisis_1962_scenario()
+    world = scenario.create_initial_world(rng_seed=1620)
+    world.truth_metrics["diplomatic_offramp"] = 0.9
+    world.hidden_clocks["nuclear_escalation"] = 0.3
+
+    evaluation = evaluate_ending_events(
+        world,
+        scenario.scenario_endings,
+        player_entity_id=scenario.player_entity_id,
+    )
+
+    assert evaluation.offer_record is None
+    assert any(
+        "settlement_reached: skipped (missing commitment" in item
+        for item in evaluation.trace
+    )
 
 
 def test_accepting_ending_persists_final_timeline_summary() -> None:
@@ -140,6 +161,7 @@ def test_turn_orchestrator_emits_ending_offer_after_resolution() -> None:
         world,
         player_entity_id=scenario.player_entity_id,
         player_intent="hold no action this turn",
+        allow_empty_player_action=True,
     )
 
     assert result.ending_result is not None

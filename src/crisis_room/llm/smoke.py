@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from crisis_room.config.settings import LlamaCppSettings, load_settings
 from crisis_room.llm.contracts import ChatRole, LLMMessage, LLMRequest
 from crisis_room.llm.llama_cpp_client import LlamaCppServerClient
+from crisis_room.llm.prompts import SMOKE_SYSTEM, SMOKE_TASK
 
 
 class SmokeResponse(BaseModel):
@@ -21,15 +22,13 @@ def build_smoke_request() -> LLMRequest:
         messages=[
             LLMMessage(
                 role=ChatRole.SYSTEM,
-                content="Return exactly one JSON object and no other text.",
+                content=SMOKE_SYSTEM,
             ),
             LLMMessage(
                 role=ChatRole.USER,
-                content='Return {"ok": true, "answer": "hello"} and nothing else.',
+                content=SMOKE_TASK,
             ),
         ],
-        temperature=0.2,
-        top_p=0.9,
         max_tokens=128,
     )
 

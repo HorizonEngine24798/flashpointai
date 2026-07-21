@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from crisis_room.agents.info_channel import ChannelRule, InfoChannelConfig, PrototypeInfoChannel
 from crisis_room.llm.contracts import FakeLLMClient
-from crisis_room.scenario.schema import build_cuban_missile_crisis_1962_scenario
+from crisis_room.scenario.cuba import build_cuban_missile_crisis_1962_scenario
 from crisis_room.state.signals import (
     PayloadType,
     Signal,

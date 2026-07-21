@@ -6,6 +6,10 @@ import { BreakingNewsTicker } from "./BreakingNewsTicker";
 import { ControlRoom } from "./ControlRoom";
 import { MediaRoom } from "./MediaRoom";
 
+const QUEUE_ACTION = "Select an action";
+const COMMIT_PLAN = "Commit freeform plan";
+const RESOLVE_AGENDA = "Resolve card agenda";
+
 type GameShellProps = {
   view: GameView;
   busy: string | null;
@@ -16,10 +20,12 @@ type GameShellProps = {
   askAdvisors: (question: string) => void;
   previewPlan: (text: string) => void;
   commitPlan: () => void;
+  cancelPlan: () => void;
   selectCard: (cardId: string) => void;
   removeAgendaItem: (agendaItemId: string) => void;
   clearAgenda: () => void;
   commitAgenda: () => void;
+  endTurn: () => void;
   sendBackchannel: (target: string, message: string) => void;
   acceptEnding: () => void;
   rejectEnding: () => void;
@@ -35,10 +41,12 @@ export function GameShell({
   askAdvisors,
   previewPlan,
   commitPlan,
+  cancelPlan,
   selectCard,
   removeAgendaItem,
   clearAgenda,
   commitAgenda,
+  endTurn,
   sendBackchannel,
   acceptEnding,
   rejectEnding
@@ -52,6 +60,10 @@ export function GameShell({
     }
     if (actionState.kind === "agenda") {
       commitAgenda();
+      return;
+    }
+    if (actionState.kind === "hold") {
+      endTurn();
     }
   }
 
@@ -69,6 +81,7 @@ export function GameShell({
           onResolve={resolveTurn}
           onRemoveAgenda={removeAgendaItem}
           onClearAgenda={clearAgenda}
+          onCancelPlan={cancelPlan}
         />
       ) : null}
 
@@ -81,6 +94,7 @@ export function GameShell({
           onSelectCard={selectCard}
           onRemoveAgenda={removeAgendaItem}
           onClearAgenda={clearAgenda}
+          onCancelPlan={cancelPlan}
         />
       ) : null}
 
@@ -91,15 +105,25 @@ export function GameShell({
       {view.ending_offers[0] ? (
         <aside className="ending-offer">
           <div>
-            <span>Ending Offer</span>
+            <span>Conclusion Available</span>
             <strong>{view.ending_offers[0].title}</strong>
             <p>{view.ending_offers[0].summary}</p>
           </div>
-          <button className="compact-command primary" type="button" onClick={acceptEnding}>
-            Accept
+          <button
+            className="compact-command primary"
+            type="button"
+            onClick={acceptEnding}
+            disabled={Boolean(busy)}
+          >
+            Accept Conclusion
           </button>
-          <button className="compact-command" type="button" onClick={rejectEnding}>
-            Reject
+          <button
+            className="compact-command"
+            type="button"
+            onClick={rejectEnding}
+            disabled={Boolean(busy)}
+          >
+            Continue Crisis
           </button>
         </aside>
       ) : null}
@@ -116,7 +140,7 @@ export function GameShell({
 }
 
 function getActionState(view: GameView): {
-  kind: "agenda" | "plan" | "blocked";
+  kind: "agenda" | "plan" | "hold" | "blocked";
   label: string;
   disabled: boolean;
   blockedReason: string;
@@ -129,7 +153,7 @@ function getActionState(view: GameView): {
   if (blockingConflict) {
     return {
       kind: "blocked",
-      label: "Resolve Conflict",
+      label: QUEUE_ACTION,
       disabled: true,
       blockedReason: blockingConflict.summary
     };
@@ -137,7 +161,7 @@ function getActionState(view: GameView): {
   if (view.turn.is_concluded) {
     return {
       kind: "blocked",
-      label: "Concluded",
+      label: QUEUE_ACTION,
       disabled: true,
       blockedReason: "This crisis has concluded."
     };
@@ -145,7 +169,7 @@ function getActionState(view: GameView): {
   if (view.plan_preview) {
     return {
       kind: "plan",
-      label: "Execute Order",
+      label: COMMIT_PLAN,
       disabled: !view.plan_preview.is_committable,
       blockedReason:
         view.plan_preview.errors[0] ??
@@ -156,15 +180,15 @@ function getActionState(view: GameView): {
   if (view.agenda.items.length) {
     return {
       kind: "agenda",
-      label: "Resolve Agenda",
+      label: RESOLVE_AGENDA,
       disabled: !view.agenda.can_commit,
       blockedReason: view.agenda.warnings[0] ?? "The agenda is not ready."
     };
   }
   return {
-    kind: "blocked",
-    label: "Queue Action First",
-    disabled: true,
-    blockedReason: "Add a proposal or order before resolving the turn."
+    kind: "hold",
+    label: "Hold position",
+    disabled: false,
+    blockedReason: "Resolve the turn without a formal action."
   };
 }

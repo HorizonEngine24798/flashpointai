@@ -23,3 +23,4 @@ output/
 saves/
 tmp/
 *.db
+codex_tmp_*/

@@ -22,15 +22,8 @@ from crisis_room.llm.diagnostics import (
     write_diagnostic_artifact,
 )
 from crisis_room.llm.prompt_fitting import PromptFitResult, fit_messages_to_budget
+from crisis_room.llm.prompts import JSON_RETRY_INSTRUCTION
 from crisis_room.llm.server_lease import ManagedLlamaServerLease
-
-
-RETRY_INSTRUCTION = (
-    "Retry instruction: your previous answer could not be parsed as one valid "
-    "JSON object. Return exactly one JSON object only. Do not include markdown "
-    "fences, explanations, or trailing text."
-)
-
 
 class LlamaCppServerClient:
     """OpenAI-compatible llama.cpp chat-completions client."""
@@ -128,8 +121,8 @@ class LlamaCppServerClient:
                 for message in fit.messages
             ],
             "max_tokens": min(request.max_tokens, self.settings.max_new_tokens),
-            "temperature": request.temperature,
-            "top_p": request.top_p,
+            "temperature": self.settings.temperature,
+            "top_p": self.settings.top_p,
             "response_format": {"type": "json_object"},
         }
         if request.response_schema_name:
@@ -253,12 +246,7 @@ def _request_for_attempt(request: LLMRequest, attempt: int) -> LLMRequest:
     if attempt <= 1:
         return request
     messages = [message.model_copy() for message in request.messages]
-    for index in range(len(messages) - 1, -1, -1):
-        if messages[index].role == ChatRole.USER:
-            messages[index].content = f"{messages[index].content}\n\n{RETRY_INSTRUCTION}"
-            break
-    else:
-        messages.append(LLMMessage(role=ChatRole.USER, content=RETRY_INSTRUCTION))
+    messages.append(LLMMessage(role=ChatRole.USER, content=JSON_RETRY_INSTRUCTION))
     return request.model_copy(update={"messages": messages})
 
 

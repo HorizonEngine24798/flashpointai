@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from crisis_room.engine.actions import ActionPackage
-from crisis_room.engine.adjudication import DeterministicEngineV2
+from crisis_room.engine.adjudication import DeterministicEngineV2, DeterministicTurnResult
 from crisis_room.llm.task_contracts import EventCandidate
 from crisis_room.scenario.event_choices import (
     build_event_choice_action,
@@ -13,7 +13,7 @@ from crisis_room.scenario.events import (
     ScenarioEventSettings,
     resolve_scenario_events,
 )
-from crisis_room.scenario.schema import build_cuban_missile_crisis_1962_scenario
+from crisis_room.scenario.cuba import build_cuban_missile_crisis_1962_scenario
 from crisis_room.state.events import ScenarioEventChoiceStatus
 from crisis_room.state.signals import SignalChannel
 
@@ -166,6 +166,19 @@ def test_event_choice_persists_and_resolves_through_capability_action() -> None:
     assert package.action_id == "private_diplomacy"
     assert package.capability_id == "cuba_open_kremlin_channel"
     assert package.metadata["event_choice_id"] == choice.choice_id
+
+    scheduled_world = resolution.world_state.model_copy(deep=True)
+    update_event_choices_from_actions(
+        scheduled_world,
+        DeterministicTurnResult(
+            world_state=scheduled_world,
+            scheduled_actions=[package],
+        ),
+    )
+    assert (
+        scheduled_world.pending_event_choices[0].status
+        == ScenarioEventChoiceStatus.PENDING
+    )
 
     choice_result = engine.resolve_actions(resolution.world_state, [package])
     update_event_choices_from_actions(choice_result.world_state, choice_result)

@@ -9,7 +9,7 @@ from crisis_room.scenario.loader import (
     load_scenario,
     validate_scenario,
 )
-from crisis_room.scenario.schema import build_cuban_missile_crisis_1962_scenario
+from crisis_room.scenario.cuba import build_cuban_missile_crisis_1962_scenario
 
 
 def test_loader_defaults_to_valid_builtin_cuba_scenario() -> None:

@@ -21,7 +21,6 @@ _NUMERIC_FIELD_NAMES = {
     "confidence",
     "perceived_risk",
     "commitment_level",
-    "risk_acceptance",
     "trust_player_delta",
     "paranoia_delta",
     "urgency_delta",
@@ -35,7 +34,6 @@ _NUMERIC_FIELD_NAMES = {
     "urgency",
     "plausibility",
     "escalation_pressure",
-    "escalation_read",
 }
 _NUMERIC_MAP_FIELD_NAMES = {
     "trust_channel_deltas",
@@ -44,9 +42,6 @@ _NUMERIC_MAP_FIELD_NAMES = {
 }
 _BOOLEAN_FIELD_NAMES = {
     "accepted",
-    "allowed",
-    "available",
-    "visible_at_the_time",
 }
 
 
@@ -108,10 +103,7 @@ class FactionDecision(LLMContractModel):
     intent_summary: str = ""
     public_rationale: str = ""
     private_rationale: str = ""
-    requested_timing: str = "current_turn"
     commitment_level: float = Field(default=0.5, ge=0.0, le=1.0)
-    risk_acceptance: float = Field(default=0.5, ge=0.0, le=1.0)
-    fallback_condition: str | None = None
     parameters: dict[str, str | int | float | bool | list[str]] = Field(default_factory=dict)
     no_action_reason: str = ""
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
@@ -159,59 +151,22 @@ class AdvisorCouncilResponse(LLMContractModel):
     proposed_advisor_deltas: list[AdvisorDeltaProposal] = Field(default_factory=list)
 
 
-AdvisorResponse = AdvisorCouncilResponse
-
-
 class BackchannelCounterpartResponse(LLMContractModel):
-    accepted: bool = True
     response_text: str = Field(min_length=1, max_length=500)
-    stance: str = Field(default="cautious", max_length=80)
     trust_delta: float = Field(default=0.0, ge=-0.12, le=0.12)
     leak_risk_delta: float = Field(default=0.0, ge=-0.05, le=0.12)
     relationship_delta: float = Field(default=0.0, ge=-0.12, le=0.12)
-    notes: list[str] = Field(default_factory=list, max_length=4)
-
-
-class BackchannelAvailabilityCheck(LLMContractModel):
-    allowed: bool = True
-    available: bool = False
-    target_entity_id: str = ""
-    target_label: str = Field(default="", max_length=120)
-    reason: str = Field(default="", max_length=300)
-    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
 class BackchannelStateChange(LLMContractModel):
     memory_note: str = Field(default="", max_length=400)
     unresolved_thread: str = Field(default="", max_length=160)
     belief_updates: list[BeliefUpdate] = Field(default_factory=list, max_length=4)
-    trust_delta: float = Field(default=0.0, ge=-0.12, le=0.12)
-    leak_risk_delta: float = Field(default=0.0, ge=-0.05, le=0.12)
-    relationship_delta: float = Field(default=0.0, ge=-0.12, le=0.12)
-    notes: list[str] = Field(default_factory=list, max_length=4)
 
 
 class SignalDistortionResponse(LLMContractModel):
     observed_content: str = Field(min_length=1, max_length=700)
     distortion_note: str = Field(default="", max_length=240)
-
-
-class IntentCompilation(LLMContractModel):
-    accepted: bool
-    action_id: str | None = None
-    capability_id: str | None = None
-    target_ids: list[str] = Field(default_factory=list)
-    channel: SignalChannel = SignalChannel.PRIVATE_DIPLOMATIC
-    intent_summary: str = ""
-    public_rationale: str = ""
-    private_rationale: str = ""
-    requested_timing: str = "current_turn"
-    commitment_level: float = Field(default=0.5, ge=0.0, le=1.0)
-    risk_acceptance: float = Field(default=0.5, ge=0.0, le=1.0)
-    fallback_condition: str | None = None
-    parameters: dict[str, str | int | float | bool | list[str]] = Field(default_factory=dict)
-    errors: list[str] = Field(default_factory=list)
-    notes: list[str] = Field(default_factory=list)
 
 
 class IntentCompilationCandidate(LLMContractModel):
@@ -223,10 +178,7 @@ class IntentCompilationCandidate(LLMContractModel):
     intent_summary: str = ""
     public_rationale: str = ""
     private_rationale: str = ""
-    requested_timing: str = "current_turn"
     commitment_level: float = Field(default=0.5, ge=0.0, le=1.0)
-    risk_acceptance: float = Field(default=0.5, ge=0.0, le=1.0)
-    fallback_condition: str | None = None
     parameters: dict[str, str | int | float | bool | list[str]] = Field(default_factory=dict)
     source_span: str = ""
     errors: list[str] = Field(default_factory=list)
@@ -258,10 +210,7 @@ class MultiIntentCompilation(LLMContractModel):
                 "intent_summary": values.get("intent_summary", ""),
                 "public_rationale": values.get("public_rationale", ""),
                 "private_rationale": values.get("private_rationale", ""),
-                "requested_timing": values.get("requested_timing", "current_turn"),
                 "commitment_level": values.get("commitment_level", 0.5),
-                "risk_acceptance": values.get("risk_acceptance", 0.5),
-                "fallback_condition": values.get("fallback_condition"),
                 "parameters": values.get("parameters", {}),
                 "errors": values.get("errors", []),
                 "notes": values.get("notes", []),
@@ -278,10 +227,7 @@ class MultiIntentCompilation(LLMContractModel):
                 "intent_summary",
                 "public_rationale",
                 "private_rationale",
-                "requested_timing",
                 "commitment_level",
-                "risk_acceptance",
-                "fallback_condition",
                 "parameters",
             ]:
                 values.pop(key, None)
@@ -311,46 +257,22 @@ class EventCandidate(LLMContractModel):
     target_entity_ids: list[str] = Field(default_factory=list)
     suggested_signals: list[SignalCandidate] = Field(default_factory=list)
     deterministic_effect_hints: dict[str, float] = Field(default_factory=dict)
-    reason_to_include: str = ""
 
 
 class InternationalPressure(LLMContractModel):
     situation_summary: str
-    legitimacy_concerns: list[str] = Field(default_factory=list)
-    requested_restraints: list[str] = Field(default_factory=list)
     pressure_signals: list[SignalCandidate] = Field(default_factory=list)
-    escalation_read: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
 class PublicBrief(LLMContractModel):
     headline: str
     summary: str
     public_risk_read: str = ""
-    safe_known_facts: list[str] = Field(default_factory=list)
-    public_uncertainties: list[str] = Field(default_factory=list)
-    omitted_private_topics: list[str] = Field(default_factory=list)
 
 
 class EventCreatorResponse(LLMContractModel):
     public_brief: PublicBrief
     event_candidate: EventCandidate | None = None
-    major_event_relevant: bool = False
-    editorial_notes: list[str] = Field(default_factory=list, max_length=6)
-
-
-class AARTurningPoint(LLMContractModel):
-    turn: int = Field(ge=0)
-    title: str
-    causal_summary: str
-    visible_at_the_time: bool = False
-
-
-class AARSummary(LLMContractModel):
-    outcome_summary: str
-    turning_points: list[AARTurningPoint] = Field(default_factory=list)
-    causal_factors: list[str] = Field(default_factory=list)
-    missed_offramps: list[str] = Field(default_factory=list)
-    uncertainty_notes: list[str] = Field(default_factory=list)
 
 
 def _require_json_number(field_name: str, value: Any) -> None:

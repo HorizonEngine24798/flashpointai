@@ -1,6 +1,7 @@
 import { X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { DebugOverlay } from "./components/DebugOverlay";
+import { ConclusionScreen } from "./components/ConclusionScreen";
 import { GameShell } from "./components/GameShell";
 import { ScenarioSelect } from "./components/ScenarioSelect";
 import { SettingsOverlay } from "./components/SettingsOverlay";
@@ -79,7 +80,11 @@ export function App() {
         />
       ) : null}
 
-      {screen === "game" && session.view ? (
+      {screen === "game" && session.view?.turn.is_concluded ? (
+        <ConclusionScreen view={session.view} onReturnToMenu={exitToStart} />
+      ) : null}
+
+      {screen === "game" && session.view && !session.view.turn.is_concluded ? (
         <GameShell
           view={session.view}
           busy={session.busy}
@@ -90,10 +95,12 @@ export function App() {
           askAdvisors={session.askAdvisors}
           previewPlan={session.previewPlan}
           commitPlan={session.commitPlan}
+          cancelPlan={session.cancelPlan}
           selectCard={session.selectCard}
           removeAgendaItem={session.removeAgendaItem}
           clearAgenda={session.clearAgenda}
           commitAgenda={session.commitAgenda}
+          endTurn={session.endTurn}
           sendBackchannel={session.sendBackchannel}
           acceptEnding={session.acceptEnding}
           rejectEnding={session.rejectEnding}

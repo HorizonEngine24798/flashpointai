@@ -1,7 +1,7 @@
 import { Bug, Landmark, RadioTower, Settings, Users } from "lucide-react";
 import type { NavigationBadgeView } from "../api/types";
 import type { RoomId } from "../state/roomState";
-import { roomLabels } from "../state/roomState";
+import { roomLabels, rooms } from "../state/roomState";
 
 type BottomNavProps = {
   room: RoomId;
@@ -27,7 +27,7 @@ export function BottomNav({ room, badges, onRoomChange, onDebug, onSettings }: B
       </button>
 
       <div className="room-buttons">
-        {(["control", "advisors", "media"] as RoomId[]).map((roomId) => {
+        {rooms.map((roomId) => {
           const Icon = roomIcons[roomId];
           const badge = badgeByRoom.get(roomId);
           const isActive = room === roomId;

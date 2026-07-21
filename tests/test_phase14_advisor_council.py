@@ -4,13 +4,13 @@ import pytest
 
 from crisis_room.agents.dialogue_engine import DialogueEngineAgent
 from crisis_room.app.advisor_updates import update_advisor_council
-from crisis_room.app.tui import _print_advisors
+from crisis_room.app.presentation import render_advisor_council
 from crisis_room.config.gameplay import ADVISOR_DELTA_CLAMP
 from crisis_room.engine.adjudication import DeterministicTurnResult
 from crisis_room.llm.contracts import FakeLLMClient
 from crisis_room.llm.scripted_client import ScriptedLLMClient
 from crisis_room.llm.task_contracts import AdvisorCouncilResponse
-from crisis_room.scenario.schema import build_cuban_missile_crisis_1962_scenario
+from crisis_room.scenario.cuba import build_cuban_missile_crisis_1962_scenario
 
 
 def test_advisor_council_response_rejects_invented_advisors() -> None:
@@ -87,17 +87,50 @@ def test_proposed_advisor_deltas_are_clamped_in_update_step() -> None:
     ].advisors["state"].trust_player + ADVISOR_DELTA_CLAMP
 
 
-def test_advisor_display_keeps_numbers_debug_only(capsys: pytest.CaptureFixture[str]) -> None:
+def test_summary_only_advisor_belief_update_is_persisted() -> None:
+    scenario = build_cuban_missile_crisis_1962_scenario()
+    world = scenario.create_initial_world(rng_seed=720)
+    before = world.model_copy(deep=True)
+    response = AdvisorCouncilResponse.model_validate(
+        {
+            "answer": "State now reads Moscow as more open to reciprocal restraint.",
+            "proposed_advisor_deltas": [
+                {
+                    "advisor_id": "state",
+                    "belief_summaries": {
+                        "soviet_intent": "Moscow may accept a reciprocal private settlement."
+                    },
+                    "reasons": ["The council reconsidered Moscow's room for compromise."],
+                }
+            ],
+        }
+    )
+
+    update = update_advisor_council(
+        world,
+        before_world_state=before,
+        player_entity_id=scenario.player_entity_id,
+        action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
+        deterministic_result=DeterministicTurnResult(world_state=world),
+        council_response=response,
+    )
+
+    assert update is not None
+    assert world.advisor_councils[scenario.player_entity_id].advisors["state"].beliefs[
+        "soviet_intent"
+    ].summary == "Moscow may accept a reciprocal private settlement."
+
+
+def test_advisor_display_keeps_numbers_debug_only() -> None:
     scenario = build_cuban_missile_crisis_1962_scenario()
     world = scenario.create_initial_world(rng_seed=73)
 
-    _print_advisors(world, scenario.player_entity_id)
-    normal = capsys.readouterr().out
+    normal = render_advisor_council(world, scenario.player_entity_id)
     assert "%" not in normal
     assert "steady trust" in normal or "strong trust" in normal
 
-    _print_advisors(world, scenario.player_entity_id, debug_mode=True)
-    debug = capsys.readouterr().out
+    debug = render_advisor_council(world, scenario.player_entity_id, debug_mode=True)
     assert "%" in debug
     assert "trust 62%" in debug
 

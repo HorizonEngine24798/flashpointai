@@ -4,27 +4,25 @@ import pytest
 from pydantic import ValidationError
 
 from crisis_room.agents.context import build_visible_context
-from crisis_room.agents.faction import FactionAgent, NESTED_LLM_CONTEXT_LIMIT
+from crisis_room.agents.faction import FactionAgent
 from crisis_room.app.turn_orchestrator import TurnOrchestrator
 from crisis_room.config.settings import LlamaCppSettings
 from crisis_room.llm.contracts import FakeLLMClient
 from crisis_room.llm.llama_cpp_client import LlamaCppServerClient
 from crisis_room.llm.task_contracts import (
     AdvisorCouncilResponse,
-    AdvisorResponse,
     BackchannelCounterpartResponse,
     EventCandidate,
     EventCreatorResponse,
     FactionDecision,
     FactionTurnResponse,
-    IntentCompilation,
     InternalDebate,
     InternationalPressure,
     MultiIntentCompilation,
     PerceptionUpdate,
     SignalDistortionResponse,
 )
-from crisis_room.scenario.schema import build_cuban_missile_crisis_1962_scenario
+from crisis_room.scenario.cuba import build_cuban_missile_crisis_1962_scenario
 from crisis_room.state.advisors import AdvisorBelief
 from crisis_room.state.events import EventChoiceOption, ScenarioEventChoiceRecord, ScenarioEventRecord
 from crisis_room.state.signals import SignalChannel
@@ -91,7 +89,12 @@ def test_gameplay_llm_requests_are_schema_guided_and_bounded() -> None:
     ]
 
     client = LlamaCppServerClient(
-        LlamaCppSettings(manage_server=False, max_new_tokens=4096)
+        LlamaCppSettings(
+            manage_server=False,
+            max_new_tokens=4096,
+            temperature=0.35,
+            top_p=0.75,
+        )
     )
     try:
         for request, (_, schema_name, max_tokens, response_model) in zip(
@@ -101,20 +104,23 @@ def test_gameplay_llm_requests_are_schema_guided_and_bounded() -> None:
         ):
             prompt_text = "\n".join(message.content for message in request.messages)
             assert request.response_schema_name == schema_name
-            assert request.temperature == 0.2
-            assert request.top_p == 0.9
+            assert "temperature" not in request.model_dump()
+            assert "top_p" not in request.model_dump()
             assert request.max_tokens == max_tokens
             assert "Return exactly one JSON object" in prompt_text
             assert "Contract guidance:" in prompt_text
             assert f"{schema_name} contract:" in prompt_text
+            assert "Task:" in request.messages[0].content
+            assert "Contract guidance:" in request.messages[0].content
+            assert "Task:" not in request.messages[1].content
 
             payload = client.build_payload(request, response_model)
             response_format = payload["response_format"]
             assert response_format["type"] == "json_schema"
             assert response_format["json_schema"]["name"] == schema_name
             assert payload["json_schema"] == response_format["json_schema"]["schema"]
-            assert payload["temperature"] == 0.2
-            assert payload["top_p"] == 0.9
+            assert payload["temperature"] == 0.35
+            assert payload["top_p"] == 0.75
             assert payload["max_tokens"] == max_tokens
         for request in distortion_requests:
             prompt_text = "\n".join(message.content for message in request.messages)
@@ -313,45 +319,51 @@ def test_multi_intent_contract_does_not_truncate_extra_candidates() -> None:
 def test_faction_single_turn_records_rich_outputs_without_followup_calls() -> None:
     scenario = build_cuban_missile_crisis_1962_scenario()
     world = scenario.create_initial_world(rng_seed=53)
-    item_count = NESTED_LLM_CONTEXT_LIMIT + 2
+    item_count = 8
     fake_llm = FakeLLMClient(
         {
-            "faction.soviet_presidium.perception_update": {
-                "situation_summary": "The visible situation is noisy.",
-                "belief_updates": [
-                    {
-                        "topic": f"topic_{index}",
-                        "summary": f"interpretation {index}",
-                        "confidence": 0.5,
-                    }
-                    for index in range(item_count)
-                ],
-                "uncertainty_notes": [f"uncertainty {index}" for index in range(item_count)],
-                "memory_notes": [f"memory {index}" for index in range(item_count)],
-                "priority_questions": [f"question {index}" for index in range(item_count)],
-            },
-            "faction.soviet_presidium.internal_debate": {
-                "positions": [
-                    {
-                        "narrative_id": f"narrative_{index}",
-                        "argument": f"argument {index}",
-                        "preferred_action_id": "private_diplomacy",
-                        "preferred_capability_id": "soviet_compromise_probe",
-                        "target_entity_ids": ["us_excomm"],
-                    }
-                    for index in range(item_count)
-                ],
-                "synthesis": "Delay while probing for restraint.",
-                "dominant_narrative_id": "narrative_0",
-                "unresolved_disagreements": [
-                    f"disagreement {index}" for index in range(item_count)
-                ],
-            },
-            "faction.soviet_presidium.faction_decision": {
-                "action_id": None,
-                "target_ids": [],
-                "intent_summary": "",
-                "no_action_reason": "Wait for clearer visible information.",
+            "faction.soviet_presidium.turn": {
+                "perception_update": {
+                    "situation_summary": "The visible situation is noisy.",
+                    "belief_updates": [
+                        {
+                            "topic": f"topic_{index}",
+                            "summary": f"interpretation {index}",
+                            "confidence": 0.5,
+                        }
+                        for index in range(item_count)
+                    ],
+                    "uncertainty_notes": [
+                        f"uncertainty {index}" for index in range(item_count)
+                    ],
+                    "memory_notes": [f"memory {index}" for index in range(item_count)],
+                    "priority_questions": [
+                        f"question {index}" for index in range(item_count)
+                    ],
+                },
+                "internal_debate": {
+                    "positions": [
+                        {
+                            "narrative_id": f"narrative_{index}",
+                            "argument": f"argument {index}",
+                            "preferred_action_id": "private_diplomacy",
+                            "preferred_capability_id": "soviet_compromise_probe",
+                            "target_entity_ids": ["us_excomm"],
+                        }
+                        for index in range(item_count)
+                    ],
+                    "synthesis": "Delay while probing for restraint.",
+                    "dominant_narrative_id": "narrative_0",
+                    "unresolved_disagreements": [
+                        f"disagreement {index}" for index in range(item_count)
+                    ],
+                },
+                "decision": {
+                    "action_id": None,
+                    "target_ids": [],
+                    "intent_summary": "",
+                    "no_action_reason": "Wait for clearer visible information.",
+                },
             },
         }
     )
@@ -405,115 +417,116 @@ def _turn_responses() -> dict[str, object]:
             "private_rationale": "Test whether a managed pause is available.",
             "parameters": {},
         },
-        "faction.soviet_presidium.perception_update": {
-            "situation_summary": "The opponent appears to be probing for restraint.",
-            "belief_updates": [
-                {
-                    "topic": "excomm intent",
-                    "summary": "EXCOMM may accept a quiet reciprocal pause",
-                    "confidence": 0.65,
-                }
-            ],
+        "faction.soviet_presidium.turn": {
+            "perception_update": {
+                "situation_summary": "The opponent appears to be probing for restraint.",
+                "belief_updates": [
+                    {
+                        "topic": "excomm intent",
+                        "summary": "EXCOMM may accept a quiet reciprocal pause",
+                        "confidence": 0.65,
+                    }
+                ],
+            },
+            "internal_debate": {
+                "positions": [
+                    {
+                        "narrative_id": "settlement",
+                        "argument": "A deniable probe could protect our public posture.",
+                        "preferred_action_id": "private_diplomacy",
+                        "preferred_capability_id": "soviet_compromise_probe",
+                        "target_entity_ids": ["us_excomm"],
+                        "perceived_risk": 0.35,
+                    }
+                ],
+                "synthesis": "Probe privately while preserving public posture.",
+                "dominant_narrative_id": "settlement",
+            },
+            "decision": {
+                "action_id": "private_diplomacy",
+                "capability_id": "soviet_compromise_probe",
+                "target_ids": ["us_excomm"],
+                "channel": "backchannel",
+                "intent_summary": "Ask privately whether reciprocal restraint remains possible.",
+                "private_rationale": "Avoid public capitulation while testing the exit.",
+                "commitment_level": 0.45,
+                "parameters": {},
+            },
         },
-        "faction.soviet_presidium.internal_debate": {
-            "positions": [
-                {
-                    "narrative_id": "settlement",
-                    "argument": "A deniable probe could protect our public posture.",
-                    "preferred_action_id": "private_diplomacy",
-                    "preferred_capability_id": "soviet_compromise_probe",
-                    "target_entity_ids": ["us_excomm"],
-                    "perceived_risk": 0.35,
-                }
-            ],
-            "synthesis": "Probe privately while preserving public posture.",
-            "dominant_narrative_id": "settlement",
+        "faction.cuba.turn": {
+            "perception_update": {
+                "situation_summary": "Havana sees invasion risk in every U.S. signal.",
+                "belief_updates": [
+                    {
+                        "topic": "invasion threat",
+                        "summary": "U.S. pressure could precede strikes.",
+                        "confidence": 0.7,
+                    }
+                ],
+            },
+            "internal_debate": {
+                "positions": [
+                    {
+                        "narrative_id": "defiant",
+                        "argument": "Raise readiness to deter attack.",
+                        "preferred_action_id": "military_posture",
+                        "preferred_capability_id": "cuba_air_defense_alert",
+                        "target_entity_ids": ["us_excomm"],
+                        "perceived_risk": 0.65,
+                    }
+                ],
+                "synthesis": "Alert posture is risky but politically necessary.",
+                "dominant_narrative_id": "defiant",
+            },
+            "decision": {
+                "action_id": "military_posture",
+                "capability_id": "cuba_air_defense_alert",
+                "target_ids": ["us_excomm"],
+                "channel": "military",
+                "intent_summary": "Raise Cuban air defense alert.",
+                "private_rationale": "Deter invasion and force Cuba's position into the crisis.",
+                "commitment_level": 0.7,
+                "parameters": {},
+            },
         },
-        "faction.soviet_presidium.faction_decision": {
-            "action_id": "private_diplomacy",
-            "capability_id": "soviet_compromise_probe",
-            "target_ids": ["us_excomm"],
-            "channel": "backchannel",
-            "intent_summary": "Ask privately whether reciprocal restraint remains possible.",
-            "private_rationale": "Avoid public capitulation while testing the exit.",
-            "commitment_level": 0.45,
-            "risk_acceptance": 0.35,
-            "parameters": {},
-        },
-        "faction.cuba.perception_update": {
-            "situation_summary": "Havana sees invasion risk in every U.S. signal.",
-            "belief_updates": [
-                {
-                    "topic": "invasion threat",
-                    "summary": "U.S. pressure could precede strikes.",
-                    "confidence": 0.7,
-                }
-            ],
-        },
-        "faction.cuba.internal_debate": {
-            "positions": [
-                {
-                    "narrative_id": "defiant",
-                    "argument": "Raise readiness to deter attack.",
-                    "preferred_action_id": "military_posture",
-                    "preferred_capability_id": "cuba_air_defense_alert",
-                    "target_entity_ids": ["us_excomm"],
-                    "perceived_risk": 0.65,
-                }
-            ],
-            "synthesis": "Alert posture is risky but politically necessary.",
-            "dominant_narrative_id": "defiant",
-        },
-        "faction.cuba.faction_decision": {
-            "action_id": "military_posture",
-            "capability_id": "cuba_air_defense_alert",
-            "target_ids": ["us_excomm"],
-            "channel": "military",
-            "intent_summary": "Raise Cuban air defense alert.",
-            "private_rationale": "Deter invasion and force Cuba's position into the crisis.",
-            "commitment_level": 0.7,
-            "risk_acceptance": 0.62,
-            "parameters": {},
-        },
-        "faction.nato_allies.perception_update": {
-            "situation_summary": "Allies need consultation before backing the next public move.",
-            "belief_updates": [
-                {
-                    "topic": "alliance consultation",
-                    "summary": "Washington needs allied confidence.",
-                    "confidence": 0.65,
-                }
-            ],
-        },
-        "faction.nato_allies.internal_debate": {
-            "positions": [
-                {
-                    "narrative_id": "solidarity",
-                    "argument": "Ask for reassurance while supporting Washington.",
-                    "preferred_action_id": "private_diplomacy",
-                    "preferred_capability_id": "nato_reassurance_pressure",
-                    "target_entity_ids": ["us_excomm"],
-                    "perceived_risk": 0.4,
-                }
-            ],
-            "synthesis": "Private consultation can preserve public solidarity.",
-            "dominant_narrative_id": "solidarity",
-        },
-        "faction.nato_allies.faction_decision": {
-            "action_id": "private_diplomacy",
-            "capability_id": "nato_reassurance_pressure",
-            "target_ids": ["us_excomm"],
-            "channel": "private_diplomatic",
-            "intent_summary": "Ask Washington for reassurance and consultation.",
-            "private_rationale": "Allied backing is stronger when allies are not surprised.",
-            "commitment_level": 0.45,
-            "risk_acceptance": 0.25,
-            "parameters": {},
+        "faction.nato_allies.turn": {
+            "perception_update": {
+                "situation_summary": "Allies need consultation before backing the next public move.",
+                "belief_updates": [
+                    {
+                        "topic": "alliance consultation",
+                        "summary": "Washington needs allied confidence.",
+                        "confidence": 0.65,
+                    }
+                ],
+            },
+            "internal_debate": {
+                "positions": [
+                    {
+                        "narrative_id": "solidarity",
+                        "argument": "Ask for reassurance while supporting Washington.",
+                        "preferred_action_id": "private_diplomacy",
+                        "preferred_capability_id": "nato_reassurance_pressure",
+                        "target_entity_ids": ["us_excomm"],
+                        "perceived_risk": 0.4,
+                    }
+                ],
+                "synthesis": "Private consultation can preserve public solidarity.",
+                "dominant_narrative_id": "solidarity",
+            },
+            "decision": {
+                "action_id": "private_diplomacy",
+                "capability_id": "nato_reassurance_pressure",
+                "target_ids": ["us_excomm"],
+                "channel": "private_diplomatic",
+                "intent_summary": "Ask Washington for reassurance and consultation.",
+                "private_rationale": "Allied backing is stronger when allies are not surprised.",
+                "commitment_level": 0.45,
+                "parameters": {},
+            },
         },
         "international.international.pressure": {
             "situation_summary": "External actors are calling for visible restraint.",
-            "legitimacy_concerns": ["Escalatory signals are raising public alarm."],
-            "requested_restraints": ["Keep diplomatic channels open."],
             "pressure_signals": [
                 {
                     "channel": "media",
@@ -524,22 +537,29 @@ def _turn_responses() -> dict[str, object]:
                 }
             ],
         },
-        "event_creator.event_creator.candidate": {
-            "candidate_id": "chaos_radio_1",
-            "kind": "chaos",
-            "title": "Confused Radio Traffic",
-            "summary": "Routine movement is misread as a warning sign.",
-            "plausibility": 0.6,
-            "escalation_pressure": 0.65,
-            "suggested_signals": [
-                {
-                    "target_entity_ids": ["us_excomm"],
-                    "channel": "intel",
-                    "payload_type": "intel_report",
-                    "content": "Intercepts suggest confused local radio traffic.",
-                    "visibility": "secret",
-                    "reliability": 0.55,
-                }
-            ],
+        "event_creator.event_creator.media_event_turn": {
+            "public_brief": {
+                "headline": "Confused Radio Traffic",
+                "summary": "Routine movement is misread as a warning sign.",
+                "public_risk_read": "Public accounts suggest a noisy standoff.",
+            },
+            "event_candidate": {
+                "candidate_id": "chaos_radio_1",
+                "kind": "chaos",
+                "title": "Confused Radio Traffic",
+                "summary": "Routine movement is misread as a warning sign.",
+                "plausibility": 0.6,
+                "escalation_pressure": 0.65,
+                "suggested_signals": [
+                    {
+                        "target_entity_ids": ["us_excomm"],
+                        "channel": "intel",
+                        "payload_type": "intel_report",
+                        "content": "Intercepts suggest confused local radio traffic.",
+                        "visibility": "secret",
+                        "reliability": 0.55,
+                    }
+                ],
+            },
         },
     }

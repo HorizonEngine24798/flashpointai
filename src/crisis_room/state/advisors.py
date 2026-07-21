@@ -9,7 +9,6 @@ class AdvisorBelief(BaseModel):
     summary: str = ""
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     last_updated_turn: int = 0
-    evidence_signal_ids: list[str] = Field(default_factory=list)
 
 
 class AdvisorState(BaseModel):
@@ -18,6 +17,8 @@ class AdvisorState(BaseModel):
     portfolio: str
     personality: str
     institutional_orientation: str = ""
+    hidden_metric_access: bool = False
+    loyal_to_player: bool = False
 
     trust_player: float = Field(default=0.5, ge=0.0, le=1.0)
     trust_advisors: dict[str, float] = Field(default_factory=dict)
@@ -25,14 +26,12 @@ class AdvisorState(BaseModel):
 
     paranoia: float = Field(default=0.5, ge=0.0, le=1.0)
     urgency: float = Field(default=0.5, ge=0.0, le=1.0)
-    corruption: float = Field(default=0.0, ge=0.0, le=1.0)
     institutional_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
 
     beliefs: dict[str, AdvisorBelief] = Field(default_factory=dict)
     memory_summary: str = ""
     recent_recommendations: list[str] = Field(default_factory=list)
     recent_embarrassments: list[str] = Field(default_factory=list)
-    metadata: dict[str, str | int | float | bool] = Field(default_factory=dict)
 
 
 class AdvisorCouncilState(BaseModel):

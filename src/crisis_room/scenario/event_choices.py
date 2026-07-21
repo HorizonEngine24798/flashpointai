@@ -63,7 +63,6 @@ def update_event_choices_from_actions(
 ) -> None:
     resolved = [
         *deterministic_result.accepted_actions,
-        *deterministic_result.scheduled_actions,
         *deterministic_result.completed_pending_actions,
     ]
     for package in resolved:

@@ -10,9 +10,15 @@ from crisis_room.config.gameplay import (
     HARD_ACTION_BUDGET,
     NORMAL_ACTION_BUDGET,
 )
-from crisis_room.engine.actions import ActionDefinition, ActionPackage, ScenarioCapability
+from crisis_room.engine.action_matching import default_targets
+from crisis_room.engine.actions import (
+    ActionDefinition,
+    ActionPackage,
+    ScenarioCapability,
+)
 from crisis_room.engine.adjudication import DeterministicEngineV2
 from crisis_room.llm.contracts import LLMClient
+from crisis_room.llm.prompts import gamemaster_system, gamemaster_task
 from crisis_room.llm.task_contracts import (
     IntentCompilationCandidate,
     MultiIntentCompilation,
@@ -55,48 +61,6 @@ class Gamemaster(Protocol):
         intent_text: str,
     ) -> GamemasterCompilation:
         """Convert player freeform intent into a deterministic action package."""
-
-
-class SimpleGamemaster:
-    """Minimal compiler for the Phase 1 fake turn path."""
-
-    def compile_player_intent(
-        self,
-        world_state: WorldStateV2,
-        actor_id: str,
-        intent_text: str,
-    ) -> GamemasterCompilation:
-        text = intent_text.strip()
-        if not text:
-            return GamemasterCompilation(
-                rejected=True,
-                errors=["formal action text is empty"],
-            )
-        if actor_id not in world_state.actors:
-            return GamemasterCompilation(
-                rejected=True,
-                errors=[f"unknown actor: {actor_id}"],
-            )
-
-        channel = _guess_channel(text)
-        target_ids = [entity_id for entity_id in world_state.actors if entity_id != actor_id]
-        package = ActionPackage(
-            actor_id=actor_id,
-            action_id="player_freeform_intent",
-            target_ids=target_ids,
-            channel=channel,
-            intent_summary=text,
-            private_rationale="Compiled from player ACTION input by SimpleGamemaster.",
-            submitted_turn=world_state.turn_number,
-        )
-        return GamemasterCompilation(
-            action_packages=[package],
-            action_package=package,
-            notes=[
-                "Compiled freeform player intent into the debug action primitive.",
-                f"Guessed channel: {channel.value}",
-            ],
-        )
 
 
 class CatalogGamemasterCompiler:
@@ -155,28 +119,9 @@ class CatalogGamemasterCompiler:
         )
         request = build_task_request(
             label=f"gamemaster.{actor_id}.intent_compilation",
-            system_prompt=(
-                "You are the gamemaster intent compiler. Translate player ACTION "
-                f"text into zero to {self.hard_action_limit} scenario capability "
-                "package candidates. "
-                "You do not resolve effects."
-            ),
+            system_prompt=gamemaster_system(self.hard_action_limit),
             visible_context=visible_context,
-            task_instruction=(
-                "Compile the player ACTION text into a MultiIntentCompilation. Use "
-                "only generic action ids, capability ids, target ids, channels, and "
-                "parameter keys present in the visible context. Split clearly separate "
-                "intents when the player asks for multiple concrete actions. The "
-                f"normal turn budget is {self.action_budget} formal actions; include "
-                "extra requested intents as additional candidates instead of silently "
-                "dropping them, so the deterministic compiler can report them as "
-                "unprocessed. Do not invent more than "
-                f"{self.hard_action_limit} actions. "
-                "Prefer fewer actions if the text describes one integrated action. "
-                "Reject individual intents that cannot be represented legally, "
-                "require unavailable targets, or ask for guaranteed effects outside "
-                "the deterministic engine."
-            ),
+            task_instruction=gamemaster_task(self.action_budget, self.hard_action_limit),
             response_schema_name="MultiIntentCompilation",
             metadata={
                 "agent": "gamemaster",
@@ -212,39 +157,22 @@ class CatalogGamemasterCompiler:
         notes: list[str] = list(compiled.notes)
         notes.extend(f"rejected intent: {intent}" for intent in compiled.rejected_intents)
 
-        if len(compiled.candidates) > self.hard_action_limit:
-            unprocessed_intents = [
-                _candidate_intent_label(candidate)
-                for candidate in compiled.candidates[self.action_budget :]
-            ]
-            notes.extend(
-                f"unprocessed intent: {intent}"
-                for intent in unprocessed_intents[: self.hard_action_limit]
-            )
-            return GamemasterCompilation(
-                rejected=True,
-                action_budget=self.action_budget,
-                hard_action_limit=self.hard_action_limit,
-                rejected_intents=_dedupe(rejected_intents),
-                unprocessed_intents=_dedupe(unprocessed_intents),
-                errors=_dedupe(
-                    [
-                        *errors,
-                        (
-                            f"player described {len(compiled.candidates)} candidate "
-                            f"actions, above the hard maximum of {self.hard_action_limit}"
-                        ),
-                    ]
-                ),
-                notes=_dedupe(notes),
-            )
-
-        candidate_budget = compiled.candidates[: self.action_budget]
-        extra_candidates = compiled.candidates[self.action_budget :]
+        bounded_candidates = compiled.candidates[: self.hard_action_limit]
+        candidate_budget = bounded_candidates[: self.action_budget]
+        extra_candidates = bounded_candidates[self.action_budget :]
         unprocessed_intents.extend(
             _candidate_intent_label(candidate)
             for candidate in extra_candidates
         )
+        overflow_count = len(compiled.candidates) - len(bounded_candidates)
+        if overflow_count > 0:
+            unprocessed_intents.append(
+                f"{overflow_count} additional candidate action(s) above the hard maximum"
+            )
+            notes.append(
+                f"intent compiler returned {len(compiled.candidates)} candidates; "
+                f"only the first {self.hard_action_limit} were inspected"
+            )
         notes.extend(
             f"unprocessed intent: {intent} (normal action budget is {self.action_budget})"
             for intent in unprocessed_intents
@@ -258,6 +186,7 @@ class CatalogGamemasterCompiler:
                 actor_id,
                 candidate,
                 index=index,
+                source_text=text,
             )
             notes.extend(candidate_notes)
             if candidate_errors:
@@ -267,6 +196,24 @@ class CatalogGamemasterCompiler:
                 )
                 continue
             if package is not None:
+                if (
+                    package.capability_id == _UNORTHODOX_CAPABILITY_ID
+                    and any(
+                        existing.capability_id == _UNORTHODOX_CAPABILITY_ID
+                        for existing in action_packages
+                    )
+                ):
+                    # ponytail: one generic gambit per turn; use a compound capability
+                    # if a scenario needs several simultaneous unorthodox premises.
+                    label = _candidate_intent_label(candidate)
+                    unprocessed_intents.append(
+                        f"{label} (only one {_UNORTHODOX_CAPABILITY_ID} is allowed per turn)"
+                    )
+                    notes.append(
+                        f"intent {index}: skipped duplicate {_UNORTHODOX_CAPABILITY_ID}; "
+                        "one generic gambit is the per-turn limit"
+                    )
+                    continue
                 action_packages.append(package)
                 compiled_intents.append(package.intent_summary)
 
@@ -291,11 +238,16 @@ class CatalogGamemasterCompiler:
         candidate: IntentCompilationCandidate,
         *,
         index: int,
+        source_text: str,
     ) -> tuple[ActionPackage | None, list[str], list[str]]:
         prefix = f"intent {index}"
         notes = list(candidate.notes)
         if not candidate.accepted:
             return None, [], [f"{prefix} rejected by compiler: {_candidate_rejection(candidate)}"]
+        fallback = self._unorthodox_fallback_candidate(candidate, source_text)
+        if fallback is not None:
+            candidate = fallback
+            notes.append(f"{prefix}: routed absurd non-catalog intent through {_UNORTHODOX_CAPABILITY_ID}")
         if not candidate.action_id:
             return None, [f"{prefix}: intent compiler accepted without action_id"], notes
         if candidate.action_id not in self._catalog_by_id:
@@ -317,27 +269,53 @@ class CatalogGamemasterCompiler:
             )
         if not candidate.intent_summary.strip():
             return None, [f"{prefix}: intent compiler returned empty intent_summary"], notes
+        semantic_errors = _semantic_substitution_errors(
+            candidate,
+            source_text=source_text,
+            prefix=prefix,
+        )
+        if semantic_errors:
+            return None, semantic_errors, notes
+
+        target_ids = list(candidate.target_ids)
+        if candidate.capability_id and not target_ids:
+            definition = next(
+                (
+                    definition
+                    for definition in self._engine.resolver.resolved_capability_definitions()
+                    if definition.action_id == candidate.action_id
+                    and definition.capability_id == candidate.capability_id
+                ),
+                None,
+            )
+            if definition is not None:
+                target_ids = default_targets(world_state, actor_id, definition)
+                if target_ids:
+                    notes.append(
+                        f"{prefix}: Filled default target(s): {', '.join(target_ids)}"
+                    )
+
+        parameters = dict(candidate.parameters)
+        if candidate.capability_id == _UNORTHODOX_CAPABILITY_ID and "premise" not in parameters:
+            parameters["premise"] = candidate.source_span or source_text or candidate.intent_summary
 
         package = ActionPackage(
             actor_id=actor_id,
             action_id=candidate.action_id,
             capability_id=candidate.capability_id,
-            target_ids=candidate.target_ids,
+            target_ids=target_ids,
             channel=candidate.channel,
             intent_summary=candidate.intent_summary,
             public_rationale=candidate.public_rationale,
             private_rationale=candidate.private_rationale,
-            requested_timing=candidate.requested_timing,
             commitment_level=candidate.commitment_level,
-            risk_acceptance=candidate.risk_acceptance,
-            fallback_condition=candidate.fallback_condition,
             submitted_turn=world_state.turn_number,
             metadata={
                 "created_by": "CatalogGamemasterCompiler",
                 "intent_index": index,
                 "source_span": candidate.source_span,
             },
-            parameters=candidate.parameters,
+            parameters=parameters,
         )
         validation = self._engine.validate_action(world_state, package)
         if not validation.is_valid:
@@ -345,18 +323,42 @@ class CatalogGamemasterCompiler:
         notes.extend(f"{prefix} warning: {warning}" for warning in validation.warnings)
         return package, [], notes
 
-
-def _guess_channel(text: str) -> SignalChannel:
-    lowered = text.lower()
-    if "public" in lowered or "announce" in lowered or "statement" in lowered:
-        return SignalChannel.PUBLIC
-    if "backchannel" in lowered:
-        return SignalChannel.BACKCHANNEL
-    if "intel" in lowered or "intelligence" in lowered:
-        return SignalChannel.INTEL
-    if "military" in lowered or "readiness" in lowered or "quarantine" in lowered:
-        return SignalChannel.MILITARY
-    return SignalChannel.PRIVATE_DIPLOMATIC
+    def _unorthodox_fallback_candidate(
+        self,
+        candidate: IntentCompilationCandidate,
+        source_text: str,
+    ) -> IntentCompilationCandidate | None:
+        capability = self._capabilities_by_id.get(_UNORTHODOX_CAPABILITY_ID)
+        if capability is None:
+            return None
+        action_ok = candidate.action_id in self._catalog_by_id
+        capability_ok = candidate.capability_id in self._capabilities_by_id
+        if action_ok and capability_ok:
+            return None
+        source = candidate.source_span or source_text or candidate.intent_summary
+        if candidate.capability_id != _UNORTHODOX_CAPABILITY_ID and not _contains_any(
+            source.lower(),
+            _ABSURD_PREMISE_MARKERS,
+        ):
+            return None
+        channel = (
+            candidate.channel
+            if candidate.channel in capability.channels_allowed
+            else capability.channels_allowed[0]
+            if capability.channels_allowed
+            else SignalChannel.PRIVATE_DIPLOMATIC
+        )
+        return candidate.model_copy(
+            update={
+                "action_id": capability.generic_action_id,
+                "capability_id": capability.capability_id,
+                "channel": channel,
+                "intent_summary": candidate.intent_summary
+                or f"Preserve unorthodox premise: {source[:160]}",
+                "parameters": {**candidate.parameters, "premise": source},
+                "source_span": candidate.source_span or source[:160],
+            }
+        )
 
 
 def _candidate_rejection(candidate: IntentCompilationCandidate) -> str:
@@ -390,3 +392,83 @@ def _dedupe(values: list[str]) -> list[str]:
         seen.add(value)
         deduped.append(value)
     return deduped
+
+
+_UNORTHODOX_CAPABILITY_ID = "cuba_unorthodox_gambit"
+
+_ABSURD_PREMISE_MARKERS = (
+    "alien",
+    "alaska",
+    "mars",
+    "moon landing",
+    "cyber",
+    "drone",
+    "teleport",
+    "time machine",
+    "colony ship",
+    "nationalize",
+    "arrest khrushchev",
+    "join nato",
+)
+
+_SEMANTICALLY_SENSITIVE_CAPABILITIES = {
+    "cuba_secret_jupiter_trade": (
+        "jupiter",
+        "turkey",
+        "missile trade",
+        "missile swap",
+    ),
+    "cuba_offer_non_invasion_pledge": (
+        "non-invasion",
+        "non invasion",
+        "pledge",
+        "guarantee",
+    ),
+    "cuba_open_kremlin_channel": (
+        "backchannel",
+        "kremlin",
+        "dobrynin",
+        "private channel",
+    ),
+    "cuba_monitor_public_mood": (
+        "public mood",
+        "monitor",
+        "press",
+        "media",
+        "poll",
+    ),
+    "cuba_rally_institutional_allies": (
+        "allies",
+        "allied",
+        "nato allies",
+        "congress",
+        "cabinet",
+    ),
+}
+
+
+def _semantic_substitution_errors(
+    candidate: IntentCompilationCandidate,
+    *,
+    source_text: str,
+    prefix: str,
+) -> list[str]:
+    capability_id = candidate.capability_id or ""
+    if capability_id == _UNORTHODOX_CAPABILITY_ID:
+        return []
+    source = (candidate.source_span or source_text or candidate.intent_summary).lower()
+    if not _contains_any(source, _ABSURD_PREMISE_MARKERS):
+        return []
+    expected = _SEMANTICALLY_SENSITIVE_CAPABILITIES.get(capability_id)
+    if expected is None or _contains_any(source, expected):
+        return []
+    return [
+        (
+            f"{prefix}: source premise is absurd or ahistorical; use "
+            f"{_UNORTHODOX_CAPABILITY_ID} or reject it instead of {capability_id}"
+        )
+    ]
+
+
+def _contains_any(text: str, needles: tuple[str, ...]) -> bool:
+    return any(needle in text for needle in needles)

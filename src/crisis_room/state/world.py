@@ -19,10 +19,6 @@ class EntityType(str, Enum):
     ALLIED_FACTION = "allied_faction"
     OPPOSING_FACTION = "opposing_faction"
     INTERNATIONAL_COMMUNITY = "international_community"
-    DIALOGUE_ENGINE = "dialogue_engine"
-    GAMEMASTER = "gamemaster"
-    EVENT_CREATOR = "event_creator"
-    INFO_CHANNEL = "info_channel"
 
 
 class EntityState(BaseModel):
@@ -36,13 +32,9 @@ class EntityState(BaseModel):
     memory_summary: str = ""
     beliefs: BeliefState = Field(default_factory=BeliefState)
     inbox: list[SignalDelivery] = Field(default_factory=list)
-    outbox: list[Signal] = Field(default_factory=list)
     doctrine: str = ""
-    known_commitments: list[str] = Field(default_factory=list)
     unresolved_threads: list[str] = Field(default_factory=list)
-    confidence_map: dict[str, float] = Field(default_factory=dict)
     resources: dict[str, int] = Field(default_factory=dict)
-    metadata: dict[str, str | int | float | bool] = Field(default_factory=dict)
 
 
 class WorldStateV2(BaseModel):

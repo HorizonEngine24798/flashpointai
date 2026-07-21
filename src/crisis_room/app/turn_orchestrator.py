@@ -20,6 +20,11 @@ from crisis_room.app.presentation import (
     build_turn_aftermath_report,
     build_turn_briefing,
 )
+from crisis_room.app.runtime_helpers import (
+    format_advisor_retry_error,
+    llm_call_count,
+    llm_call_records,
+)
 from crisis_room.config.gameplay import HARD_ACTION_BUDGET, NORMAL_ACTION_BUDGET
 from crisis_room.engine.actions import ActionDefinition, ActionPackage, ScenarioCapability
 from crisis_room.engine.adjudication import DeterministicEngineV2, DeterministicTurnResult
@@ -28,6 +33,7 @@ from crisis_room.engine.batch_validation import (
     build_batch_validation_report,
 )
 from crisis_room.llm.contracts import LLMCallRecord, LLMClient
+from crisis_room.llm.diagnostics import LlamaCppJSONError
 from crisis_room.llm.task_contracts import AdvisorCouncilResponse
 from crisis_room.llm.task_contracts import EventCandidate
 from crisis_room.scenario.endings import (
@@ -42,10 +48,31 @@ from crisis_room.scenario.events import (
     ScenarioEventSettings,
     resolve_scenario_events,
 )
+from crisis_room.scenario.pressure import (
+    HiddenObligation,
+    PressureResolution,
+    PressureRule,
+    apply_scenario_pressure,
+)
 from crisis_room.state.advisors import AdvisorCouncilUpdate
 from crisis_room.state.backchannels import BackchannelThreadUpdate
 from crisis_room.state.signals import Signal
 from crisis_room.state.world import EntityState, EntityType, WorldStateV2
+
+
+RECOVERABLE_PLAYER_ACTION_TEXT = (
+    "I could not turn that into a valid action. Please reword it or name the "
+    "action and target more directly.\n"
+    "The turn has not advanced."
+)
+
+
+class RecoverablePlayerActionError(ValueError):
+    """Player can retry a failed formal action without advancing the turn."""
+
+
+class RecoverableAdvisorDialogueError(ValueError):
+    """Player can retry a failed advisor prompt without advancing the turn."""
 
 
 class TurnDebugTranscript(BaseModel):
@@ -63,6 +90,7 @@ class TurnDebugTranscript(BaseModel):
     advisor_update: AdvisorCouncilUpdate | None = None
     backchannel_update: BackchannelThreadUpdate | None = None
     batch_validation_report: BatchValidationReport | None = None
+    pressure_resolution: PressureResolution | None = None
     scenario_event_result: ScenarioEventResolution | None = None
     ending_result: EndingEvaluation | None = None
     agent_outputs: dict[str, AgentOutput] = Field(default_factory=dict)
@@ -83,6 +111,7 @@ class OrchestratedTurnResult(BaseModel):
     advisor_update: AdvisorCouncilUpdate | None = None
     backchannel_update: BackchannelThreadUpdate | None = None
     batch_validation_report: BatchValidationReport | None = None
+    pressure_resolution: PressureResolution | None = None
     scenario_event_result: ScenarioEventResolution | None = None
     ending_result: EndingEvaluation | None = None
     agent_outputs: dict[str, AgentOutput] = Field(default_factory=dict)
@@ -103,6 +132,8 @@ class TurnOrchestrator:
         llm_client: LLMClient,
         scenario_events: list[ScenarioEventDefinition] | None = None,
         scenario_endings: list[ScenarioEndingDefinition] | None = None,
+        pressure_rules: list[PressureRule] | None = None,
+        hidden_obligations: list[HiddenObligation] | None = None,
         event_settings: ScenarioEventSettings | None = None,
         info_channel: PrototypeInfoChannel | None = None,
         action_budget: int = NORMAL_ACTION_BUDGET,
@@ -115,6 +146,11 @@ class TurnOrchestrator:
         self.scenario_events = [event.model_copy(deep=True) for event in scenario_events or []]
         self.scenario_endings = [
             ending.model_copy(deep=True) for ending in scenario_endings or []
+        ]
+        self.pressure_rules = [rule.model_copy(deep=True) for rule in pressure_rules or []]
+        self.hidden_obligations = [
+            obligation.model_copy(deep=True)
+            for obligation in hidden_obligations or []
         ]
         self.event_settings = event_settings or ScenarioEventSettings()
         self.llm_client = llm_client
@@ -142,9 +178,10 @@ class TurnOrchestrator:
         player_message: str = "",
         scenario_notes: list[str] | None = None,
         precompiled_player_compilation: GamemasterCompilation | None = None,
+        allow_empty_player_action: bool = False,
     ) -> OrchestratedTurnResult:
         start_turn = world_state.turn_number
-        llm_call_start = _llm_call_count(self.llm_client)
+        llm_call_start = llm_call_count(self.llm_client)
         start_routing_result = self.info_channel.route_signals(world_state, [])
         working_world = start_routing_result.world_state
         player_briefing = build_turn_briefing(
@@ -157,12 +194,18 @@ class TurnOrchestrator:
 
         dialogue_response = None
         if player_message.strip():
-            dialogue_response = self.dialogue_engine.respond_to_player(
-                working_world,
-                player_entity_id=player_entity_id,
-                player_message=player_message,
-                llm_client=self.llm_client,
-            )
+            try:
+                dialogue_response = self.dialogue_engine.respond_to_player(
+                    working_world,
+                    player_entity_id=player_entity_id,
+                    player_message=player_message,
+                    llm_client=self.llm_client,
+                    json_retries=1,
+                )
+            except LlamaCppJSONError as exc:
+                raise RecoverableAdvisorDialogueError(
+                    format_advisor_retry_error(exc)
+                ) from exc
 
         if precompiled_player_compilation is None:
             player_compilation = self.gamemaster.compile_player_intent(
@@ -173,9 +216,23 @@ class TurnOrchestrator:
         else:
             player_compilation = precompiled_player_compilation.model_copy(deep=True)
 
+        player_action_packages = (
+            [] if player_compilation.rejected else list(player_compilation.action_packages)
+        )
+        valid_player_action_count, player_validation_errors = self._validate_player_actions(
+            working_world,
+            player_action_packages,
+        )
+        if not allow_empty_player_action and valid_player_action_count == 0:
+            raise RecoverablePlayerActionError(
+                _recoverable_player_action_message(
+                    player_compilation,
+                    player_validation_errors,
+                )
+            )
+
         action_packages: list[ActionPackage] = []
-        if not player_compilation.rejected:
-            action_packages.extend(player_compilation.action_packages)
+        action_packages.extend(player_action_packages)
 
         agent_outputs, agent_signals = self._run_entity_agents(
             working_world,
@@ -210,6 +267,15 @@ class TurnOrchestrator:
                 *formal_backchannel_response_signals,
                 *emitted_signals,
             ],
+        )
+        pressure_resolution = apply_scenario_pressure(
+            final_routing_result.world_state,
+            pressure_rules=self.pressure_rules,
+            hidden_obligations=self.hidden_obligations,
+            deterministic_result=deterministic_result,
+        )
+        final_routing_result = final_routing_result.model_copy(
+            update={"world_state": pressure_resolution.world_state}
         )
         event_output = self.event_creator.create_candidate(
             final_routing_result.world_state,
@@ -267,6 +333,11 @@ class TurnOrchestrator:
                 world_state=final_routing_result.world_state,
             )
         next_world = final_routing_result.world_state
+        _record_player_posture_observations(
+            next_world,
+            final_routing_result,
+            player_entity_id=player_entity_id,
+        )
         update_event_choices_from_actions(next_world, deterministic_result)
         backchannel_update = update_backchannel_threads(
             next_world,
@@ -315,6 +386,7 @@ class TurnOrchestrator:
             batch_validation_report=batch_validation_report,
             scenario_event_result=scenario_event_result,
             event_output=event_output,
+            pressure_resolution=pressure_resolution,
             action_budget=self.action_budget,
         )
         next_world.turn_number += 1
@@ -331,6 +403,7 @@ class TurnOrchestrator:
             batch_validation_report=batch_validation_report,
             backchannel_update=backchannel_update,
             advisor_update=advisor_update,
+            pressure_resolution=pressure_resolution,
             deterministic_result=deterministic_result,
             start_routing_result=start_routing_result,
             final_routing_result=final_routing_result,
@@ -350,13 +423,14 @@ class TurnOrchestrator:
             advisor_update=advisor_update,
             backchannel_update=backchannel_update,
             batch_validation_report=batch_validation_report,
+            pressure_resolution=pressure_resolution,
             scenario_event_result=scenario_event_result,
             ending_result=ending_result,
             agent_outputs=agent_outputs,
             event_output=event_output,
             deterministic_result=deterministic_result,
             final_routing_result=final_routing_result,
-            llm_calls=_llm_call_records(self.llm_client, start_index=llm_call_start),
+            llm_calls=llm_call_records(self.llm_client, start_index=llm_call_start),
             rendered_text=rendered_text,
         )
         return OrchestratedTurnResult(
@@ -369,6 +443,7 @@ class TurnOrchestrator:
             advisor_update=advisor_update,
             backchannel_update=backchannel_update,
             batch_validation_report=batch_validation_report,
+            pressure_resolution=pressure_resolution,
             scenario_event_result=scenario_event_result,
             ending_result=ending_result,
             agent_outputs=agent_outputs,
@@ -422,6 +497,21 @@ class TurnOrchestrator:
             )
         return None
 
+    def _validate_player_actions(
+        self,
+        world_state: WorldStateV2,
+        action_packages: list[ActionPackage],
+    ) -> tuple[int, list[str]]:
+        valid_count = 0
+        errors: list[str] = []
+        for package in action_packages:
+            validation = self.engine.validate_action(world_state, package)
+            if validation.is_valid:
+                valid_count += 1
+            else:
+                errors.extend(validation.errors)
+        return valid_count, errors
+
 
 def _leak_triggered_scenario_events(
     scenario_events: list[ScenarioEventDefinition],
@@ -432,6 +522,39 @@ def _leak_triggered_scenario_events(
         if event.trigger.required_any_leaked_signal_action_ids
         or event.trigger.required_any_leaked_signal_capability_ids
     ]
+
+
+def _record_player_posture_observations(
+    world_state: WorldStateV2,
+    routing_result: RoutingResult,
+    *,
+    player_entity_id: str,
+) -> None:
+    recipients = {
+        delivery.recipient_entity_id
+        for delivery in routing_result.deliveries
+        if delivery.source_entity_id == player_entity_id
+    }
+    player = world_state.actors.get(player_entity_id)
+    player_name = player.name if player is not None else player_entity_id
+    for entity in world_state.actors.values():
+        if entity.entity_type not in {
+            EntityType.ALLIED_FACTION,
+            EntityType.OPPOSING_FACTION,
+        }:
+            continue
+        if entity.entity_id in recipients:
+            continue
+        world_state.append_entity_timeline(
+            entity.entity_id,
+            "No Visible Player Move",
+            (
+                f"No new formal move from {player_name} reached this actor this turn. "
+                "The absence may indicate restraint, indecision, concealment, or weakness."
+            ),
+            source="gamemaster",
+            tags=["posture", "absence_of_signal"],
+        )
 
 
 def _merge_routing_results(
@@ -506,42 +629,61 @@ def _merge_ending_result(
     )
 
 
-def _llm_call_count(llm_client: LLMClient) -> int:
-    calls = getattr(llm_client, "calls", [])
-    if not isinstance(calls, list):
-        return 0
-    return len(calls)
-
-
-def _llm_call_records(
-    llm_client: LLMClient,
-    *,
-    start_index: int = 0,
-) -> list[LLMCallRecord]:
-    calls = getattr(llm_client, "calls", [])
-    if not isinstance(calls, list):
-        return []
-    records: list[LLMCallRecord] = []
-    for call in calls[start_index:]:
-        if isinstance(call, LLMCallRecord):
-            records.append(call.model_copy(deep=True))
-        elif isinstance(call, dict):
-            records.append(LLMCallRecord.model_validate(call))
-    return records
-
-
 def _event_candidate_from_output(output: AgentOutput | None) -> EventCandidate | None:
     if output is None:
         return None
     for raw in reversed(output.raw_llm_outputs):
-        if raw.get("task") != "event_candidate":
+        task = raw.get("task")
+        if task not in {"event_candidate", "event_creator_response"}:
             continue
         response = raw.get("response")
+        if task == "event_creator_response" and isinstance(response, dict):
+            response = response.get("event_candidate")
+        if response is None:
+            return None
         if isinstance(response, EventCandidate):
             return response
         if isinstance(response, dict):
             return EventCandidate.model_validate(response)
     return None
+
+
+def _recoverable_player_action_message(
+    compilation: GamemasterCompilation,
+    validation_errors: list[str],
+) -> str:
+    hints = _friendly_action_hints(
+        [
+            *compilation.errors,
+            *compilation.rejected_intents,
+            *validation_errors,
+        ]
+    )
+    return "\n".join([RECOVERABLE_PLAYER_ACTION_TEXT, *hints])
+
+
+def _friendly_action_hints(errors: list[str]) -> list[str]:
+    hints: list[str] = []
+    for error in errors:
+        lowered = error.lower()
+        if "requires at least" in lowered and "target" in lowered:
+            _append_once(hints, "This action needs a target.")
+            _append_once(
+                hints,
+                "Try: ACTION open a private Kremlin channel to soviet_presidium.",
+            )
+        elif "parameters missing required keys" in lowered and "message_text" in lowered:
+            _append_once(hints, "This action needs a message.")
+        elif "non-catalog" in lowered:
+            _append_once(hints, "Name one listed action or capability.")
+    if not hints and errors:
+        hints.append("No legal action was compiled from that wording.")
+    return hints[:2]
+
+
+def _append_once(values: list[str], value: str) -> None:
+    if value not in values:
+        values.append(value)
 
 
 def _render_turn_debug(
@@ -557,6 +699,7 @@ def _render_turn_debug(
     batch_validation_report: BatchValidationReport | None,
     backchannel_update: BackchannelThreadUpdate | None,
     advisor_update: AdvisorCouncilUpdate | None,
+    pressure_resolution: PressureResolution | None,
     deterministic_result: DeterministicTurnResult,
     start_routing_result: RoutingResult,
     final_routing_result: RoutingResult,
@@ -702,6 +845,19 @@ def _render_turn_debug(
     lines.extend(
         [
             "",
+            "[scenario_pressure]",
+            f"- applications: {len(pressure_resolution.applications) if pressure_resolution else 0}",
+        ]
+    )
+    if pressure_resolution is not None:
+        for application in pressure_resolution.applications:
+            lines.append(f"- {application.rule_id}: {application.summary}")
+            lines.extend(f"  effect: {effect}" for effect in application.effect_summary)
+        for item in pressure_resolution.trace:
+            lines.append(f"  trace: {item}")
+    lines.extend(
+        [
+            "",
             "[final_info_channel]",
             f"- deliveries: {len(final_routing_result.deliveries)}",
             f"- delayed: {len(final_routing_result.delayed_signals)}",
@@ -731,9 +887,12 @@ def _attempted_action(output: AgentOutput) -> str:
     if output.action_package is not None:
         return _package_label(output.action_package)
     for raw in reversed(output.raw_llm_outputs):
-        if raw.get("task") != "faction_decision":
+        task = raw.get("task")
+        if task not in {"faction_decision", "faction_turn"}:
             continue
         response = raw.get("response")
+        if task == "faction_turn" and isinstance(response, dict):
+            response = response.get("decision")
         if isinstance(response, dict):
             action_id = response.get("action_id")
             capability_id = response.get("capability_id")

@@ -9,7 +9,7 @@ from crisis_room.engine.actions import ActionPackage
 from crisis_room.engine.adjudication import DeterministicEngineV2
 from crisis_room.llm.scripted_client import ScriptedLLMClient
 from crisis_room.scenario.events import resolve_scenario_events
-from crisis_room.scenario.schema import build_cuban_missile_crisis_1962_scenario
+from crisis_room.scenario.cuba import build_cuban_missile_crisis_1962_scenario
 from crisis_room.state.signals import SignalChannel
 from crisis_room.state.world import WorldStateV2
 

@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from crisis_room.agents.info_channel import PrototypeInfoChannel
-from crisis_room.app.debug_runtime import run_fake_turn
-from crisis_room.scenario.schema import build_cuban_missile_crisis_1962_scenario
+from crisis_room.scenario.cuba import build_cuban_missile_crisis_1962_scenario
 from crisis_room.state.signals import (
     PayloadType,
     Signal,
@@ -120,22 +119,3 @@ def test_public_and_omniscient_timelines_stay_separate_for_private_signal() -> N
         "A private offer exists."
     )
     assert "secret_offer" not in routed.entity_timelines["soviet_presidium"].entries[-1].summary
-
-
-def test_fake_turn_runs_without_live_llm() -> None:
-    scenario = build_cuban_missile_crisis_1962_scenario()
-    world = scenario.create_initial_world(rng_seed=99)
-
-    result = run_fake_turn(
-        world,
-        player_entity_id=scenario.player_entity_id,
-        player_intent="open a private Kremlin backchannel and ask for a reciprocal pause",
-    )
-
-    assert result.world_state.turn_number == 2
-    assert result.deterministic_result is not None
-    assert len(result.deterministic_result.accepted_actions) == 1
-    assert result.routing_result is not None
-    assert result.routing_result.deliveries
-    assert result.agent_outputs["soviet_presidium"].perception_summary
-    assert "DEBUG TURN DUMP" in result.debug_dump_text

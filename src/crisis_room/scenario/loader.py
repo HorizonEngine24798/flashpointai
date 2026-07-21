@@ -7,7 +7,8 @@ import re
 
 from pydantic import ValidationError
 
-from crisis_room.scenario.schema import Scenario, build_cuban_missile_crisis_1962_scenario
+from crisis_room.scenario.cuba import build_cuban_missile_crisis_1962_scenario
+from crisis_room.scenario.schema import Scenario
 from crisis_room.state.timelines import TimelineEntry
 
 

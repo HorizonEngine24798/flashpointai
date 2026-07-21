@@ -1,13 +1,8 @@
-import type { GameView, SaveSummaryView, ScenarioOptionView } from "./types";
+import type { GameView, ScenarioOptionView } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
-const USE_MOCK_GAME_VIEW = import.meta.env.VITE_USE_MOCK_GAME_VIEW === "true";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  if (USE_MOCK_GAME_VIEW) {
-    throw new Error("Mock GUI fixture was removed during the room UI reset.");
-  }
-
   const response = await fetch(`${API_BASE}${path}`, {
     headers: {
       "Content-Type": "application/json",
@@ -59,10 +54,9 @@ export const api = {
     request<GameView>("/api/plan/commit", {
       method: "POST"
     }),
-  freeformAction: (text: string) =>
-    request<GameView>("/api/action/freeform", {
-      method: "POST",
-      body: JSON.stringify({ text })
+  cancelPlan: () =>
+    request<GameView>("/api/plan/cancel", {
+      method: "POST"
     }),
   selectCard: (card_id: string) =>
     request<GameView>("/api/agenda/select", {
@@ -86,7 +80,6 @@ export const api = {
     request<GameView>("/api/turn/end", {
       method: "POST"
     }),
-  saves: () => request<SaveSummaryView[]>("/api/saves"),
   saveGame: (name: string) =>
     request<GameView>("/api/saves", {
       method: "POST",
@@ -96,11 +89,6 @@ export const api = {
     request<GameView>("/api/saves/load", {
       method: "POST",
       body: JSON.stringify({ save_id })
-    }),
-  toggleDebug: (enabled: boolean | null = null) =>
-    request<GameView>("/api/debug/toggle", {
-      method: "POST",
-      body: JSON.stringify({ enabled })
     }),
   sendBackchannel: (target_query: string, message_text: string) =>
     request<GameView>("/api/backchannels/send", {

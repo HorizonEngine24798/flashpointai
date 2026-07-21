@@ -27,6 +27,7 @@ from crisis_room.app.gui_schema import (
     AssetManifestView,
     BackchannelThreadView,
     BreakingNewsItemView,
+    ChannelMessageView,
     ChannelThreadView,
     ControlRoomView,
     DebugView,
@@ -55,7 +56,7 @@ from crisis_room.app.gui_schema import (
     event_choice_card_id,
 )
 from crisis_room.app.presentation import ActionCard, TurnAftermathReport, TurnBriefing
-from crisis_room.engine.actions import ActionPackage
+from crisis_room.engine.actions import ActionPackage, ActionResolver
 from crisis_room.scenario.endings import active_ending_offers
 from crisis_room.state.backchannels import BackchannelThreadStatus
 from crisis_room.state.events import ScenarioEventChoiceRecord
@@ -116,6 +117,8 @@ def build_game_view(session: GameSession) -> GameView:
             situation_summary=briefing.situation_summary,
             open_problems=problems,
             recent_results=_recent_result_lines(latest_result),
+            latest_result=latest_result,
+            critical_warnings=list(briefing.critical_warnings),
             pressure=pressure,
             resources=resources,
             agenda=agenda,
@@ -123,6 +126,7 @@ def build_game_view(session: GameSession) -> GameView:
         ),
         advisor_room=_advisor_room_view(
             council=council,
+            council_read=briefing.council_read,
             action_groups=action_groups,
             agenda=agenda,
             conflicts=conflicts,
@@ -138,6 +142,7 @@ def build_game_view(session: GameSession) -> GameView:
         asset_manifest=_asset_manifest_view(),
         agenda=agenda,
         plan_preview=_plan_preview_view(session),
+        pending_event_choices=pending_event_choices,
         ending_offers=ending_offers,
         saves=saves,
         debug=_debug_view(session) if session.debug_visible else None,
@@ -152,15 +157,16 @@ def build_turn_result_view(
     return TurnResultView(
         turn_number=report.turn_number,
         accepted_actions=list(report.accepted_actions),
+        resolved_actions=list(report.resolved_actions),
         rejected_actions=list(report.rejected_actions),
+        resource_blocked_actions=list(report.resource_blocked_actions),
         scheduled_actions=list(report.scheduled_actions),
+        critical_warnings=list(report.critical_warnings),
         batch_warnings=list(report.batch_warnings),
         flash_events=list(report.flash_events),
         media_headlines=list(report.media_headlines),
-        consequences=[
-            f"{item.title}: {item.summary}"
-            for item in report.consequences
-        ],
+        pressure_updates=list(report.pressure_updates),
+        consequences=_consequence_lines(report),
         advisor_reactions=list(report.advisor_reactions),
         npc_reactions=list(report.npc_reactions),
         new_problems=[
@@ -302,6 +308,7 @@ def _nav_badges(
 def _advisor_room_view(
     *,
     council: AdvisorCouncilView,
+    council_read: list[str],
     action_groups: list[ActionSourceGroupView],
     agenda: AgendaView,
     conflicts: list[AgendaConflictView],
@@ -352,6 +359,7 @@ def _advisor_room_view(
         figures=figures,
         proposals=proposals,
         council_messages=council.summary,
+        council_read=council_read,
         agenda=agenda,
         agenda_conflicts=conflicts,
         latest_dialogue=latest_dialogue,
@@ -362,10 +370,28 @@ def _channel_thread_views(
     backchannels: list[BackchannelThreadView],
     session: GameSession,
 ) -> list[ChannelThreadView]:
-    has_recent_update = bool(session.world.backchannel_update_history)
-    return [
-        ChannelThreadView(
+    views: list[ChannelThreadView] = []
+    for thread in backchannels:
+        state = session.world.backchannel_threads.get(thread.thread_id)
+        messages = [
+            ChannelMessageView(
+                message_id=record.record_id,
+                sender=(
+                    "You"
+                    if record.sender_entity_id == session.player_id
+                    else session.world.actors.get(record.sender_entity_id).name
+                    if record.sender_entity_id in session.world.actors
+                    else record.sender_entity_id.replace("_", " ").title()
+                ),
+                text=record.summary,
+                turn=record.turn_number,
+                is_player=record.sender_entity_id == session.player_id,
+            )
+            for record in (state.message_records[-6:] if state is not None else [])
+        ]
+        views.append(ChannelThreadView(
             thread_id=thread.thread_id,
+            target_id=thread.target_id,
             counterpart=thread.counterpart,
             status=thread.status,
             expires_turn=thread.expires_turn,
@@ -373,10 +399,10 @@ def _channel_thread_views(
             trust_band=thread.trust_band,
             leak_risk_band=thread.leak_risk_band,
             latest=thread.latest,
-            unread=has_recent_update and thread.expires_turn >= session.world.turn_number,
-        )
-        for thread in backchannels
-    ]
+            messages=messages,
+            unread=bool(messages and not messages[-1].is_player and messages[-1].turn >= session.world.turn_number),
+        ))
+    return views
 
 
 def _agenda_conflicts(
@@ -423,6 +449,22 @@ def _recent_result_lines(result: TurnResultView | None) -> list[str]:
     if not lines and result.rendered_text:
         lines = [line for line in result.rendered_text.splitlines() if line.strip()]
     return lines[:10]
+
+
+def _consequence_lines(report: TurnAftermathReport) -> list[str]:
+    lines: list[str] = []
+    for item in report.consequences:
+        if item.source_package_id == "observed_turn_shift":
+            lines.extend(f"Observed: {change}" for change in item.visible_metric_changes)
+            if not item.visible_metric_changes:
+                lines.append(f"Observed: {item.summary}")
+            continue
+        lines.append(f"Possible driver - {item.title}: {item.summary}")
+        lines.extend(
+            f"Reported pressure - {item.title}: {change}"
+            for change in item.visible_metric_changes
+        )
+    return lines
 
 
 def _settings_view() -> SettingsView:
@@ -699,7 +741,8 @@ def _plan_preview_view(session: GameSession) -> PlanPreviewView | None:
         is_committable=preview.is_committable,
         actions=[
             PlanPreviewActionView(
-                title=package.intent_summary or package.mechanical_id,
+                title=_package_title(session, package),
+                intent_summary=package.intent_summary,
                 action_id=package.action_id,
                 capability_id=package.capability_id,
                 target_ids=list(package.target_ids),
@@ -714,13 +757,29 @@ def _plan_preview_view(session: GameSession) -> PlanPreviewView | None:
         ],
         errors=list(preview.compilation.errors),
         notes=list(preview.compilation.notes[:6]),
+        known_pending_actions=list(preview.known_pending_actions),
+        resource_pressure=[_humanize_plan_line(item) for item in preview.resource_pressure],
+        open_backchannel_constraints=list(preview.open_backchannel_constraints),
+        recent_event_context=list(preview.recent_event_context),
+        visible_flash_event_risks=list(preview.visible_flash_event_risks),
+        known_consequences=list(preview.known_consequences),
+        compiled_intents=list(preview.compilation.compiled_intents),
+        rejected_intents=list(preview.compilation.rejected_intents),
+        unprocessed_intents=list(preview.compilation.unprocessed_intents),
+        action_slots_used=len(preview.compilation.action_packages),
+        action_slots_available=preview.compilation.action_budget,
         rendered_text=session.plan_preview_rendered,
     )
 
 
 def _turn_result_view(session: GameSession) -> TurnResultView | None:
-    if session.latest_aftermath_report is None:
+    if session.latest_aftermath_report is None and not session.latest_result_rendered:
         return None
+    if session.latest_aftermath_report is None:
+        return TurnResultView(
+            turn_number=session.world.turn_number,
+            rendered_text=session.latest_result_rendered,
+        )
     return build_turn_result_view(
         session.latest_aftermath_report,
         rendered_text=session.latest_result_rendered,
@@ -741,6 +800,8 @@ def _advisor_dialogue_view(session: GameSession) -> AdvisorDialogueView | None:
         ],
         risk_warnings=list(response.risk_warnings),
         suggested_moves=list(response.suggested_capability_ids or response.suggested_action_ids),
+        information_gaps=list(response.information_gaps),
+        visible_context_limits=list(response.visible_context_limits),
     )
 
 
@@ -750,6 +811,8 @@ def _backchannel_views(world: WorldStateV2, player_id: str) -> list[BackchannelT
         if player_id not in thread.participant_entity_ids:
             continue
         if thread.status != BackchannelThreadStatus.OPEN:
+            continue
+        if thread.expires_turn < world.turn_number:
             continue
         counterpart_ids = [
             entity_id
@@ -761,10 +824,15 @@ def _backchannel_views(world: WorldStateV2, player_id: str) -> list[BackchannelT
             for entity_id in counterpart_ids
             if entity_id in world.actors
         ]
-        latest = thread.message_records[-1].summary if thread.message_records else ""
+        opened_by = _thread_opened_by(world, thread, player_id)
+        latest_report = thread.message_records[-1].summary if thread.message_records else ""
+        latest = f"Opened by {opened_by}."
+        if latest_report:
+            latest = f"{latest} Latest reported exchange: {latest_report}"
         views.append(
             BackchannelThreadView(
                 thread_id=thread.thread_id,
+                target_id=counterpart_ids[0] if counterpart_ids else "",
                 counterpart=", ".join(counterpart_names or counterpart_ids) or "Unknown",
                 status=thread.status.value,
                 expires_turn=thread.expires_turn,
@@ -778,6 +846,21 @@ def _backchannel_views(world: WorldStateV2, player_id: str) -> list[BackchannelT
         )
     views.sort(key=lambda item: (item.expires_turn, item.counterpart))
     return views
+
+
+def _thread_opened_by(
+    world: WorldStateV2,
+    thread: object,
+    player_id: str,
+) -> str:
+    sender = str(getattr(thread, "metadata", {}).get("opened_by") or "")
+    records = getattr(thread, "message_records", [])
+    if not sender and records:
+        sender = records[0].sender_entity_id
+    if sender == player_id:
+        return "you"
+    actor = world.actors.get(sender)
+    return actor.name if actor is not None else (sender or "an unclear source")
 
 
 def _pending_event_choice_views(
@@ -837,7 +920,7 @@ def _timeline_views(world: WorldStateV2, player_id: str) -> list[TimelineEntryVi
             source=entry.source,
             created_at=entry.created_at,
         )
-        for entry in entries[-12:]
+        for entry in entries[-50:]
     ]
 
 
@@ -934,6 +1017,27 @@ def _package_dump(package: ActionPackage | None) -> dict[str, Any] | None:
     if package is None:
         return None
     return package.model_dump(mode="json")
+
+
+def _package_title(session: GameSession, package: ActionPackage) -> str:
+    definition, errors = ActionResolver(
+        session.scenario.action_catalog,
+        session.scenario.capabilities,
+    ).resolve_package(package)
+    return definition.title if definition is not None and not errors else package.mechanical_id.replace("_", " ").title()
+
+
+def _humanize_plan_line(line: str) -> str:
+    for key in (
+        "political_capital",
+        "military_readiness",
+        "alliance_credit",
+        "intelligence_focus",
+        "diplomatic_flexibility",
+        "air_defense_control",
+    ):
+        line = line.replace(key, _resource_label(key))
+    return line
 
 
 def _group_rank(source_type: str, title: str) -> int:

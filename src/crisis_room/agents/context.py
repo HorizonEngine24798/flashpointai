@@ -6,10 +6,10 @@ from typing import Any
 from crisis_room.engine.actions import ActionDefinition, ActionResolver, ScenarioCapability
 from crisis_room.config.gameplay import (
     DEFAULT_LLM_MAX_TOKENS,
-    DEFAULT_LLM_TEMPERATURE,
-    DEFAULT_LLM_TOP_P,
-    HARD_ACTION_BUDGET,
-    NORMAL_ACTION_BUDGET,
+    ELEVATED_RISK_BAND_THRESHOLD,
+    GUARDED_RISK_BAND_THRESHOLD,
+    HIGH_RISK_BAND_THRESHOLD,
+    LOW_RISK_BAND_THRESHOLD,
     VISIBLE_CONTEXT_ACTION_CATALOG_LIMIT,
     VISIBLE_CONTEXT_ACTION_PROMPT_HINT_LIMIT,
     VISIBLE_CONTEXT_ADVISOR_BELIEF_LIMIT,
@@ -23,134 +23,10 @@ from crisis_room.config.gameplay import (
     VISIBLE_CONTEXT_TIMELINE_LIMIT,
 )
 from crisis_room.llm.contracts import ChatRole, LLMMessage, LLMRequest
+from crisis_room.llm.prompts import JSON_OBJECT_SYSTEM_INSTRUCTION, schema_contract_guidance
 from crisis_room.state.backchannels import BackchannelThreadStatus
 from crisis_room.state.timelines import Timeline, TimelineEntry
 from crisis_room.state.world import EntityState, WorldStateV2
-
-
-_ADVISOR_COUNCIL_RESPONSE_GUIDANCE = (
-    "AdvisorCouncilResponse contract: answer should directly address "
-    "player_message. advisor_views must use advisor_id values copied from "
-    "advisor_council.allowed_advisor_ids, with advisor_name matching the council. "
-    "Do not invent advisors. council_summary should synthesize the room without "
-    "numeric state. risk_warnings must be concrete hazards. "
-    "suggested_capability_ids must be capability_id values copied from visible "
-    "action_catalog entries; suggested_action_ids may name the matching generic "
-    "action ids. information_gaps and visible_context_limits should mark "
-    "uncertainty or unavailable information. proposed_advisor_deltas are optional "
-    "small state hints for the existing advisor update step; they must use known "
-    "advisor ids, explain reasons, and avoid exposing numbers to the player."
-)
-
-
-_SCHEMA_CONTRACT_GUIDANCE = {
-    "AdvisorCouncilResponse": _ADVISOR_COUNCIL_RESPONSE_GUIDANCE,
-    "AdvisorResponse": _ADVISOR_COUNCIL_RESPONSE_GUIDANCE,
-    "BackchannelCounterpartResponse": (
-        "BackchannelCounterpartResponse contract: respond as the target entity to "
-        "one incoming direct backchannel message using only visible context. "
-        "response_text must be concise, bounded, and suitable to route as a "
-        "confidential signal. Deltas are small mechanical hints, not guaranteed "
-        "outcomes: keep trust_delta, leak_risk_delta, and relationship_delta within "
-        "the schema bounds and do not reveal hidden state."
-    ),
-    "BackchannelAvailabilityCheck": (
-        "BackchannelAvailabilityCheck contract: decide whether the requested "
-        "backchannel target maps to an available scenario actor. A message can be "
-        "allowed even when it is not available; available means target_entity_id is "
-        "one visible actor with gamestate in actor_public_profiles. Do not invent "
-        "actors for people or groups that are not present in the scenario."
-    ),
-    "BackchannelStateChange": (
-        "BackchannelStateChange contract: determine the bounded actor-local state "
-        "changes caused by one completed backchannel exchange. Prefer belief_updates, "
-        "memory_note, unresolved_thread, and small trust/leak/relationship deltas. "
-        "Do not change global truth, public metrics, resources, or deterministic "
-        "action outcomes."
-    ),
-    "SignalDistortionResponse": (
-        "SignalDistortionResponse contract: rewrite only the observed message as "
-        "received through a noisy crisis channel. Preserve the broad subject and "
-        "source, but omit, garble, soften, harden, or introduce uncertainty in "
-        "details. Do not add new hard facts, actors, numbers, commitments, or "
-        "omniscient knowledge."
-    ),
-    "IntentCompilation": (
-        "IntentCompilation contract: if accepted is true, action_id must be one "
-        "visible generic action id and capability_id must be one visible capability "
-        "bound to that action. target_ids must be visible entity ids allowed by that "
-        "capability, channel must be allowed, parameters must contain only keys "
-        "listed in parameter_schema, and intent_summary must be non-empty. If "
-        "accepted is false, set action_id and capability_id to null, target_ids to "
-        "an empty list, and explain the rejection in errors."
-    ),
-    "MultiIntentCompilation": (
-        "MultiIntentCompilation contract: translate the player ACTION text into zero "
-        f"to {HARD_ACTION_BUDGET} candidates. The normal action budget is "
-        f"{NORMAL_ACTION_BUDGET}; report obvious extra requested intents as "
-        "additional candidates so they can be marked unprocessed. Split clearly "
-        "separate concrete intents, but prefer one "
-        "candidate when wording describes one integrated action. Each accepted "
-        "candidate must use one visible generic action_id plus one visible "
-        "capability_id bound to it, visible target_ids, an allowed channel, strict "
-        "parameters from parameter_schema, and a non-empty intent_summary. Reject "
-        "individual intents that cannot be represented legally; do not invent more "
-        f"than {HARD_ACTION_BUDGET} actions."
-    ),
-    "PerceptionUpdate": (
-        "PerceptionUpdate contract: write from this entity's local viewpoint only. "
-        "Use belief_updates for changed interpretations tied to visible evidence; "
-        "source_signal_ids should come from inbox entries when available. Put gaps "
-        "in uncertainty_notes or priority_questions instead of inventing secrets."
-    ),
-    "InternalDebate": (
-        "InternalDebate contract: positions should map to visible internal narratives "
-        "when possible. narrative_id should use an existing narrative id or a short "
-        "stable label. preferred_action_id must be a visible generic action id or "
-        "null, and preferred_capability_id should name the visible capability when "
-        "one fits. target_entity_ids must be visible entity ids. synthesis must be "
-        "non-empty."
-    ),
-    "FactionDecision": (
-        "FactionDecision contract: to act, use a visible generic action_id, a "
-        "visible capability_id bound to it, visible target_ids, an allowed channel, "
-        "strict parameters from parameter_schema, and a non-empty intent_summary. "
-        "To choose no action, set action_id and capability_id to null, target_ids "
-        "to an empty list, and provide no_action_reason. Do not narrate "
-        "deterministic effects as facts."
-    ),
-    "FactionTurnResponse": (
-        "FactionTurnResponse contract: produce one coherent faction turn in a "
-        "single response. perception_update must be entity-local and evidence-bound; "
-        "internal_debate must stage distinct internal narratives with real tension, "
-        "preferred catalog actions when useful, and a synthesis; decision must be "
-        "legal against visible action_catalog or explicitly choose no action. "
-        "self_critique should name doubts, red-team objections, or uncertainty that "
-        "tempered the final decision. Do not expose hidden state or deterministic "
-        "effects as facts."
-    ),
-    "InternationalPressure": (
-        "InternationalPressure contract: describe outside pressure, not direct state "
-        "mutation. pressure_signals must be plausible SignalCandidate objects using "
-        "visible entity ids when targeted. Keep reliability, leak_risk, "
-        "distortion_risk, urgency, and escalation_read between 0 and 1."
-    ),
-    "EventCandidate": (
-        "EventCandidate contract: candidate_id should be short and stable, kind must "
-        "match the allowed event kinds, and title plus summary must describe one "
-        "specific pressure event. suggested_signals must be plausible information "
-        "packets. deterministic_effect_hints are numeric non-authoritative hints only."
-    ),
-    "EventCreatorResponse": (
-        "EventCreatorResponse contract: always return a public_brief suitable for "
-        "headline news using only public timeline, public metrics, public actor "
-        "profiles, and scenario-public event context. event_candidate is optional "
-        "and should be non-null only when a major historically grounded, chaotic, "
-        "institutional, local-initiative, or media-leak pressure event is relevant. "
-        "Candidate effects are hints only; deterministic code decides whether an "
-        "event actually fires."
-    ),
-}
 
 
 def build_visible_context(
@@ -195,9 +71,7 @@ def build_visible_context(
                 narrative.model_dump(mode="json")
                 for narrative in entity_state.internal_narratives
             ],
-            "known_commitments": entity_state.known_commitments,
             "unresolved_threads": entity_state.unresolved_threads,
-            "confidence_map": entity_state.confidence_map,
         },
         "public_metrics": world_state.public_metrics,
         "actor_public_profiles": [
@@ -267,6 +141,8 @@ def build_visible_context(
                     "portfolio": advisor.portfolio,
                     "personality": advisor.personality,
                     "institutional_orientation": advisor.institutional_orientation,
+                    "hidden_metric_access": advisor.hidden_metric_access,
+                    "loyal_to_player": advisor.loyal_to_player,
                     "trust_player": advisor.trust_player,
                     "trust_advisors": advisor.trust_advisors,
                     "trust_channels": advisor.trust_channels,
@@ -291,6 +167,10 @@ def build_visible_context(
                 for advisor in bounded_advisors
             ],
         }
+        if any(advisor.hidden_metric_access for advisor in bounded_advisors):
+            context["advisor_council"]["hidden_pressure_bands"] = _hidden_pressure_bands(
+                world_state
+            )
         context["context_limits"].update(
             {
                 "advisor_total": len(advisors),
@@ -329,35 +209,31 @@ def build_task_request(
     task_instruction: str,
     response_schema_name: str,
     metadata: dict[str, str | int | float | bool] | None = None,
-    temperature: float = DEFAULT_LLM_TEMPERATURE,
-    top_p: float = DEFAULT_LLM_TOP_P,
     max_tokens: int = DEFAULT_LLM_MAX_TOKENS,
 ) -> LLMRequest:
-    contract_guidance = _SCHEMA_CONTRACT_GUIDANCE.get(response_schema_name)
-    user_sections = [
-        f"Visible context JSON:\n{json.dumps(visible_context, sort_keys=True)}",
+    contract_guidance = schema_contract_guidance(response_schema_name)
+    system_sections = [
+        system_prompt,
+        JSON_OBJECT_SYSTEM_INSTRUCTION,
         f"Task:\n{task_instruction}",
     ]
     if contract_guidance:
-        user_sections.append(f"Contract guidance:\n{contract_guidance}")
+        system_sections.append(f"Contract guidance:\n{contract_guidance}")
     return LLMRequest(
         label=label,
         messages=[
             LLMMessage(
                 role=ChatRole.SYSTEM,
-                content=(
-                    f"{system_prompt}\n\n"
-                    "Return exactly one JSON object matching the requested schema. "
-                    "Do not include markdown fences or explanatory text."
-                ),
+                content="\n\n".join(system_sections),
             ),
             LLMMessage(
                 role=ChatRole.USER,
-                content="\n\n".join(user_sections),
+                content=(
+                    "Visible context JSON:\n"
+                    f"{json.dumps(visible_context, sort_keys=True)}"
+                ),
             ),
         ],
-        temperature=temperature,
-        top_p=top_p,
         max_tokens=max_tokens,
         response_schema_name=response_schema_name,
         metadata=metadata or {},
@@ -399,8 +275,16 @@ def _action_definition_excerpt(
         "target_ids_allowed": definition.target_ids_allowed,
         "channels_allowed": [channel.value for channel in definition.channels_allowed],
         "required_resources": definition.required_resources,
+        "resource_costs": definition.resource_costs,
+        "preparation_turns": definition.preparation_turns,
+        "execution_turns": definition.execution_turns,
         "min_targets": definition.min_targets,
         "max_targets": definition.max_targets,
+        "escalation_risk": definition.escalation_risk,
+        "deescalation_potential": definition.deescalation_potential,
+        "signal_leak_risk": definition.signal_leak_risk,
+        "signal_distortion_risk": definition.signal_distortion_risk,
+        "information_outputs": [item.value for item in definition.information_outputs],
         "parameter_schema": {
             name: parameter.model_dump(mode="json")
             for name, parameter in definition.parameter_schema.items()
@@ -489,8 +373,29 @@ def _visible_pending_choices(
 
 
 def _bounded_advisor_beliefs(values: object, *, limit: int) -> list[dict[str, Any]]:
-    beliefs = list(values)
+    beliefs = sorted(
+        values,
+        key=lambda belief: belief.last_updated_turn,
+        reverse=True,
+    )
     return [belief.model_dump(mode="json") for belief in beliefs[: max(limit, 0)]]
+
+
+def _hidden_pressure_bands(world_state: WorldStateV2) -> dict[str, str]:
+    values = {**world_state.truth_metrics, **world_state.hidden_clocks}
+    return {key: _pressure_band(float(value)) for key, value in sorted(values.items())}
+
+
+def _pressure_band(value: float) -> str:
+    if value < LOW_RISK_BAND_THRESHOLD:
+        return "low"
+    if value < GUARDED_RISK_BAND_THRESHOLD:
+        return "guarded"
+    if value < ELEVATED_RISK_BAND_THRESHOLD:
+        return "rising"
+    if value < HIGH_RISK_BAND_THRESHOLD:
+        return "dangerous"
+    return "critical"
 
 
 def _backchannel_context(
@@ -505,6 +410,7 @@ def _backchannel_context(
         for thread in world_state.backchannel_threads.values()
         if entity_id in thread.participant_entity_ids
         and thread.status == BackchannelThreadStatus.OPEN
+        and thread.expires_turn >= world_state.turn_number
     ]
     threads.sort(key=lambda thread: (thread.last_active_turn, thread.expires_turn), reverse=True)
     bounded_threads = threads[: max(thread_limit, 0)]

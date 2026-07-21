@@ -2,7 +2,19 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from crisis_room.agents.context import build_task_request, build_visible_context
+from crisis_room.app.backchannel_actions import (
+    _direct_message_leak_summary,
+    _formal_backchannel_action_package,
+    _is_formal_backchannel_message,
+)
+from crisis_room.app.backchannel_llm import (
+    _request_backchannel_state_change,
+    _request_counterpart_response,
+)
+from crisis_room.app.backchannel_rendering import (
+    render_backchannel_direct_message_result,
+    render_backchannel_threads,
+)
 from crisis_room.agents.gamemaster import GamemasterCompilation
 from crisis_room.agents.info_channel import PrototypeInfoChannel, RoutingResult
 from crisis_room.config.gameplay import (
@@ -38,7 +50,6 @@ from crisis_room.engine.adjudication import DeterministicEngineV2, Deterministic
 from crisis_room.engine.clocks import clamp
 from crisis_room.llm.contracts import LLMClient
 from crisis_room.llm.task_contracts import (
-    BackchannelAvailabilityCheck,
     BackchannelCounterpartResponse,
     BackchannelStateChange,
 )
@@ -54,33 +65,6 @@ from crisis_room.state.signals import PayloadType, Signal, SignalChannel, Signal
 from crisis_room.state.world import WorldStateV2
 
 
-FORMAL_BACKCHANNEL_CAPABILITY_ID = "cuba_direct_kremlin_message"
-
-_FORMAL_BACKCHANNEL_PREFIXES = ("formal:", "action:", "commit:")
-_FORMAL_BACKCHANNEL_TOKENS = [
-    "air strike",
-    "bomb",
-    "deal",
-    "guarantee",
-    "invasion",
-    "jupiter",
-    "missile trade",
-    "non invasion",
-    "non-invasion",
-    "pledge",
-    "quarantine",
-    "remove missiles",
-    "reciprocal",
-    "settlement",
-    "strike",
-    "trade",
-    "turkey",
-    "ultimatum",
-    "withdraw",
-    "withdrawal",
-]
-
-
 class BackchannelDirectMessageResult(BaseModel):
     world_state: WorldStateV2
     accepted: bool
@@ -91,7 +75,6 @@ class BackchannelDirectMessageResult(BaseModel):
     thread_id: str = ""
     player_message: str = ""
     response_text: str = ""
-    availability: BackchannelAvailabilityCheck | None = None
     counterpart_response: BackchannelCounterpartResponse | None = None
     state_change: BackchannelStateChange | None = None
     routing_result: RoutingResult | None = None
@@ -273,42 +256,26 @@ def send_backchannel_message(
         target_label=target_label,
         message_text=message_text,
     )
-    availability: BackchannelAvailabilityCheck | None = None
+    available = False
     if not errors and _backchannel_exchange_used_this_turn(
         next_world,
         player_entity_id=player_entity_id,
     ):
         errors.append("direct message budget is exhausted for this turn")
     if not errors:
-        availability = (
-            _request_backchannel_availability(
-                next_world,
-                player_entity_id=player_entity_id,
-                target_query=target_label,
-                message_text=message_text,
-                action_catalog=action_catalog or [],
-                capabilities=capabilities or [],
-                llm_client=llm_client,
-            )
-            if llm_client is not None
-            else _fallback_backchannel_availability(
-                next_world,
-                player_entity_id=player_entity_id,
-                target_query=target_label,
-            )
+        resolved_target_id = resolve_backchannel_target(
+            next_world,
+            player_entity_id=player_entity_id,
+            target_query=target_label,
         )
-        target_entity_id = availability.target_entity_id.strip()
-        target_label = availability.target_label or target_label
-        if not availability.allowed:
+        if resolved_target_id is None:
             errors.append(
-                availability.reason
-                or f"backchannel message is not allowed for {target_label}"
+                f"Unknown backchannel target: {target_label}. Try BACKCHANNELS to list open threads."
             )
-        elif not availability.available or not target_entity_id:
-            errors.append(
-                availability.reason
-                or f"backchannel target is not available: {target_label}"
-            )
+        else:
+            target_entity_id = resolved_target_id
+            target_label = next_world.actors[target_entity_id].name
+            available = True
 
     if not errors:
         errors = _validate_direct_message(
@@ -348,13 +315,12 @@ def send_backchannel_message(
         return BackchannelDirectMessageResult(
             world_state=next_world,
             accepted=False,
-            available=bool(availability and availability.available),
+            available=available,
             errors=errors,
             target_entity_id=target_entity_id,
             target_label=target_label,
             thread_id=thread_id,
             player_message=message_text,
-            availability=availability,
             update=persisted_update,
         )
 
@@ -385,10 +351,12 @@ def send_backchannel_message(
         )
         message_effect = _DirectMessageEffect(
             response_text=counterpart_response.response_text,
-            trust_delta=state_change.trust_delta,
-            leak_risk_delta=state_change.leak_risk_delta,
+            trust_delta=counterpart_response.trust_delta,
+            leak_risk_delta=counterpart_response.leak_risk_delta,
         )
-        relationship_delta = state_change.relationship_delta or state_change.trust_delta
+        relationship_delta = (
+            counterpart_response.relationship_delta or counterpart_response.trust_delta
+        )
     else:
         message_effect = _direct_message_effect(message_text, thread)
         relationship_delta = message_effect.trust_delta
@@ -468,7 +436,6 @@ def send_backchannel_message(
         thread_id=thread.thread_id,
         player_message=message_text,
         response_text=message_effect.response_text,
-        availability=availability,
         counterpart_response=counterpart_response,
         state_change=state_change,
         routing_result=routing_result,
@@ -598,61 +565,6 @@ def build_formal_backchannel_response_signals(
     return signals
 
 
-def render_backchannel_threads(world_state: WorldStateV2, *, viewer_entity_id: str) -> str:
-    lines = ["BACKCHANNELS"]
-    threads = [
-        thread
-        for thread in world_state.backchannel_threads.values()
-        if viewer_entity_id in thread.participant_entity_ids
-        and thread.status == BackchannelThreadStatus.OPEN
-    ]
-    threads.sort(key=lambda thread: (thread.expires_turn, thread.last_active_turn))
-    if not threads:
-        lines.append("No active backchannel threads.")
-        return "\n".join(lines)
-    for thread in threads:
-        counterpart_ids = [
-            entity_id
-            for entity_id in thread.participant_entity_ids
-            if entity_id != viewer_entity_id
-        ]
-        counterpart = ", ".join(counterpart_ids) or "unknown counterpart"
-        lines.append(
-            f"- {counterpart}: open until turn {thread.expires_turn}, "
-            f"trust {thread.trust_level:.0%}, leak risk {thread.leak_risk:.0%}"
-        )
-        if thread.player_entity_id == viewer_entity_id:
-            lines.append(
-                "  direct messages remaining: "
-                f"{thread.player_messages_remaining_for_turn(world_state.turn_number)}"
-            )
-        if thread.message_records:
-            latest = thread.message_records[-1]
-            lines.append(f"  latest: {latest.summary}")
-    return "\n".join(lines)
-
-
-def render_backchannel_direct_message_result(
-    result: BackchannelDirectMessageResult,
-) -> str:
-    if not result.accepted:
-        lines = ["BACKCHANNEL FAILED"]
-        lines.extend(f"- {error}" for error in result.errors)
-        return "\n".join(lines)
-    thread = result.world_state.backchannel_threads.get(result.thread_id)
-    lines = [
-        "BACKCHANNEL",
-        f"Sent to {result.target_entity_id}: {result.player_message}",
-        f"Response: {result.response_text}",
-    ]
-    if thread is not None:
-        lines.append(
-            f"Thread: {thread.player_messages_used}/{thread.max_player_messages} "
-            f"direct messages used, open until turn {thread.expires_turn}."
-        )
-    return "\n".join(lines)
-
-
 def _record_backchannel_action(
     world_state: WorldStateV2,
     update: BackchannelThreadUpdate,
@@ -679,6 +591,7 @@ def _record_backchannel_action(
             trust_level=_initial_thread_trust(definition),
             leak_risk=_initial_thread_leak_risk(definition),
             max_player_messages=_message_budget(definition),
+            metadata={"opened_by": package.actor_id},
         )
         world_state.backchannel_threads[thread_id] = thread
         _append_unique(update.opened_thread_ids, thread_id)
@@ -813,6 +726,9 @@ def _validate_thread_for_direct_message(
         return
     if thread is None:
         errors.append(f"no active backchannel thread with {target_entity_id}")
+        errors.append(
+            f"Try: ACTION open a private Kremlin channel to {target_entity_id}."
+        )
         return
     if thread.status != BackchannelThreadStatus.OPEN:
         errors.append(f"backchannel thread with {target_entity_id} is not open")
@@ -822,144 +738,6 @@ def _validate_thread_for_direct_message(
         return
     if thread.player_messages_remaining_for_turn(world_state.turn_number) <= 0:
         errors.append(f"direct message budget is exhausted for {target_entity_id}")
-
-
-def _request_backchannel_availability(
-    world_state: WorldStateV2,
-    *,
-    player_entity_id: str,
-    target_query: str,
-    message_text: str,
-    action_catalog: list[ActionDefinition],
-    capabilities: list[ScenarioCapability],
-    llm_client: LLMClient,
-) -> BackchannelAvailabilityCheck:
-    player = world_state.actors[player_entity_id]
-    visible_context = build_visible_context(
-        player,
-        world_state,
-        action_catalog=action_catalog,
-        capabilities=capabilities,
-        player_message=message_text,
-        extra={
-            "backchannel_target_query": target_query,
-            "available_actor_ids": [
-                entity_id
-                for entity_id in world_state.actors
-                if entity_id != player_entity_id
-            ],
-        },
-    )
-    request = build_task_request(
-        label=f"backchannel.{player_entity_id}.availability",
-        system_prompt=(
-            "You are the gamemaster checking whether a direct backchannel message "
-            "can reach a scenario actor. The target can be free-form, but available "
-            "targets must map to an actor with gamestate."
-        ),
-        visible_context=visible_context,
-        task_instruction=(
-            "Return a BackchannelAvailabilityCheck for the requested target. "
-            "Set allowed true for ordinary attempts even if no scenario actor is "
-            "available. Set available true only when target_entity_id exactly "
-            "matches a visible actor other than the player. Family members, aides, "
-            "or unnamed intermediaries without actor gamestate should be allowed "
-            "but unavailable."
-        ),
-        response_schema_name="BackchannelAvailabilityCheck",
-        metadata={
-            "agent": "backchannel_availability",
-            "player_entity_id": player_entity_id,
-            "turn_number": world_state.turn_number,
-        },
-        max_tokens=500,
-    )
-    return llm_client.complete_json(request, BackchannelAvailabilityCheck)
-
-
-def _fallback_backchannel_availability(
-    world_state: WorldStateV2,
-    *,
-    player_entity_id: str,
-    target_query: str,
-) -> BackchannelAvailabilityCheck:
-    target_entity_id = resolve_backchannel_target(
-        world_state,
-        player_entity_id=player_entity_id,
-        target_query=target_query,
-    )
-    if target_entity_id is None:
-        return BackchannelAvailabilityCheck(
-            allowed=True,
-            available=False,
-            target_label=target_query,
-            reason="Target has no scenario actor gamestate.",
-            confidence=0.7,
-        )
-    actor = world_state.actors[target_entity_id]
-    return BackchannelAvailabilityCheck(
-        allowed=True,
-        available=True,
-        target_entity_id=target_entity_id,
-        target_label=actor.name,
-        reason="Target maps to a scenario actor with gamestate.",
-        confidence=0.9,
-    )
-
-
-def _request_backchannel_state_change(
-    world_state: WorldStateV2,
-    *,
-    player_entity_id: str,
-    target_entity_id: str,
-    message_text: str,
-    response: BackchannelCounterpartResponse,
-    thread: BackchannelThread,
-    action_catalog: list[ActionDefinition],
-    capabilities: list[ScenarioCapability],
-    llm_client: LLMClient,
-) -> BackchannelStateChange:
-    target = world_state.actors[target_entity_id]
-    visible_context = build_visible_context(
-        target,
-        world_state,
-        action_catalog=action_catalog,
-        capabilities=capabilities,
-        player_message=message_text,
-        extra={
-            "completed_backchannel_exchange": {
-                "from_entity_id": player_entity_id,
-                "to_entity_id": target_entity_id,
-                "thread_id": thread.thread_id,
-                "target_response": response.model_dump(mode="json"),
-                "trust_level": thread.trust_level,
-                "leak_risk": thread.leak_risk,
-            }
-        },
-    )
-    request = build_task_request(
-        label=f"backchannel.{target_entity_id}.state_change",
-        system_prompt=(
-            "You are the gamemaster resolving bounded actor-local consequences "
-            "from one completed backchannel exchange. Do not resolve formal actions."
-        ),
-        visible_context=visible_context,
-        task_instruction=(
-            "Return a BackchannelStateChange for the target actor. Apply only "
-            "changes that follow from the message and response: belief updates, "
-            "one memory note, one unresolved thread, and small relationship or "
-            "leak-risk deltas. Leave fields empty or zero when nothing changes."
-        ),
-        response_schema_name="BackchannelStateChange",
-        metadata={
-            "agent": "backchannel_state_change",
-            "actor_id": target_entity_id,
-            "player_entity_id": player_entity_id,
-            "turn_number": world_state.turn_number,
-        },
-        max_tokens=700,
-    )
-    return llm_client.complete_json(request, BackchannelStateChange)
 
 
 def _apply_backchannel_state_change(
@@ -1028,6 +806,7 @@ def _open_direct_backchannel_thread(
         trust_level=DEFAULT_BACKCHANNEL_TRUST,
         leak_risk=DEFAULT_BACKCHANNEL_LEAK_RISK,
         max_player_messages=DEFAULT_BACKCHANNEL_DIRECT_MESSAGE_BUDGET,
+        metadata={"opened_by": player_entity_id},
     )
     world_state.backchannel_threads[thread_id] = thread
     _append_unique(update.opened_thread_ids, thread_id)
@@ -1066,123 +845,6 @@ def _mark_backchannel_exchange_used(
 
 def _backchannel_exchange_turn_key(player_entity_id: str) -> str:
     return f"backchannel_exchange_turn:{player_entity_id}"
-
-
-def _is_formal_backchannel_message(message_text: str) -> bool:
-    lowered = message_text.strip().lower()
-    if any(lowered.startswith(prefix) for prefix in _FORMAL_BACKCHANNEL_PREFIXES):
-        return True
-    return any(token in lowered for token in _FORMAL_BACKCHANNEL_TOKENS)
-
-
-def _request_counterpart_response(
-    world_state: WorldStateV2,
-    *,
-    player_entity_id: str,
-    target_entity_id: str,
-    message_text: str,
-    thread: BackchannelThread,
-    action_catalog: list[ActionDefinition],
-    capabilities: list[ScenarioCapability],
-    llm_client: LLMClient,
-) -> BackchannelCounterpartResponse:
-    target = world_state.actors[target_entity_id]
-    visible_context = build_visible_context(
-        target,
-        world_state,
-        action_catalog=action_catalog,
-        capabilities=capabilities,
-        player_message=message_text,
-        extra={
-            "incoming_backchannel_message": {
-                "from_entity_id": player_entity_id,
-                "to_entity_id": target_entity_id,
-                "thread_id": thread.thread_id,
-                "trust_level": thread.trust_level,
-                "leak_risk": thread.leak_risk,
-                "player_messages_remaining": thread.player_messages_remaining_for_turn(
-                    world_state.turn_number
-                ),
-            }
-        },
-    )
-    request = build_task_request(
-        label=f"backchannel.{target_entity_id}.counterpart_response",
-        system_prompt=(
-            "You are the recipient of a direct backchannel message in a crisis "
-            "simulation. Reply as the target entity through the same covert channel. "
-            "Do not resolve deterministic game effects."
-        ),
-        visible_context=visible_context,
-        task_instruction=(
-            "Return a BackchannelCounterpartResponse to the incoming direct message. "
-            "Keep response_text concise enough to be routed as one backchannel signal. "
-            "Use the delta fields only as bounded hints about tone, trust, and leak "
-            "pressure."
-        ),
-        response_schema_name="BackchannelCounterpartResponse",
-        metadata={
-            "agent": "backchannel_counterpart",
-            "actor_id": target_entity_id,
-            "player_entity_id": player_entity_id,
-            "turn_number": world_state.turn_number,
-        },
-        max_tokens=700,
-    )
-    return llm_client.complete_json(request, BackchannelCounterpartResponse)
-
-
-def _formal_backchannel_action_package(
-    world_state: WorldStateV2,
-    *,
-    player_entity_id: str,
-    target_entity_id: str,
-    message_text: str,
-    thread: BackchannelThread,
-    counterpart_response: BackchannelCounterpartResponse,
-) -> ActionPackage:
-    clean_message = _strip_formal_prefix(message_text)
-    return ActionPackage(
-        actor_id=player_entity_id,
-        action_id="backchannel_message",
-        capability_id=FORMAL_BACKCHANNEL_CAPABILITY_ID,
-        target_ids=[target_entity_id],
-        channel=SignalChannel.BACKCHANNEL,
-        intent_summary=clean_message,
-        private_rationale=clean_message,
-        submitted_turn=world_state.turn_number,
-        commitment_level=0.55,
-        risk_acceptance=0.45,
-        metadata={
-            "created_by": "prepare_backchannel_message",
-            "direct_backchannel_message": True,
-            "formal_backchannel_message": True,
-            "backchannel_thread_id": thread.thread_id,
-            "counterpart_response_text": counterpart_response.response_text,
-            "counterpart_trust_delta": counterpart_response.trust_delta,
-            "counterpart_leak_risk_delta": counterpart_response.leak_risk_delta,
-            "counterpart_relationship_delta": counterpart_response.relationship_delta,
-            "counterpart_accepted": counterpart_response.accepted,
-            "leak_summary": _direct_message_leak_summary(player_entity_id, target_entity_id),
-        },
-        parameters={"message_text": clean_message},
-    )
-
-
-def _strip_formal_prefix(message_text: str) -> str:
-    stripped = message_text.strip()
-    lowered = stripped.lower()
-    for prefix in _FORMAL_BACKCHANNEL_PREFIXES:
-        if lowered.startswith(prefix):
-            return stripped[len(prefix) :].strip()
-    return stripped
-
-
-def _direct_message_leak_summary(player_entity_id: str, target_entity_id: str) -> str:
-    return (
-        "Rumor spreads that a direct backchannel message moved between "
-        f"{player_entity_id} and {target_entity_id}."
-    )
 
 
 def _direct_message_effect(

@@ -162,6 +162,10 @@ def create_app(
     def commit_plan() -> GameView:
         return _call(app.state.session.commit_plan)
 
+    @app.post("/api/plan/cancel", response_model=GameView)
+    def cancel_plan() -> GameView:
+        return _call(app.state.session.cancel_plan)
+
     @app.post("/api/action/freeform", response_model=GameView)
     def freeform_action(request: TextRequest) -> GameView:
         return _call(lambda: app.state.session.submit_freeform_action(request.text))

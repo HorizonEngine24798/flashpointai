@@ -45,12 +45,16 @@ def test_settings_load_env_and_normalize_base_url(monkeypatch) -> None:
     monkeypatch.setenv("CRISIS_ROOM_LLAMACPP_BASE_URL", "http://127.0.0.1:9090")
     monkeypatch.setenv("CRISIS_ROOM_LLAMACPP_MAX_NEW_TOKENS", "256")
     monkeypatch.setenv("CRISIS_ROOM_LLAMACPP_MANAGE_SERVER", "false")
+    monkeypatch.setenv("CRISIS_ROOM_LLAMACPP_TEMPERATURE", "0.35")
+    monkeypatch.setenv("CRISIS_ROOM_LLAMACPP_TOP_P", "0.75")
 
     settings = load_settings().llama_cpp
 
     assert settings.base_url == "http://127.0.0.1:9090/v1"
     assert settings.max_new_tokens == 256
     assert not settings.manage_server
+    assert settings.temperature == 0.35
+    assert settings.top_p == 0.75
     assert LlamaCppSettings(base_url="localhost:7777").base_url == "http://localhost:7777/v1"
 
 
@@ -502,7 +506,7 @@ def test_llama_cpp_client_retries_invalid_json_and_writes_diagnostic() -> None:
 
     assert response.answer == "fixed"
     assert len(seen_payloads) == 2
-    retry_user = seen_payloads[1]["messages"][1]["content"]
+    retry_user = seen_payloads[1]["messages"][-1]["content"]
     assert "Retry instruction" in retry_user
     assert list(diagnostics_dir.glob("retry_json_1_*.json"))
     client.close()

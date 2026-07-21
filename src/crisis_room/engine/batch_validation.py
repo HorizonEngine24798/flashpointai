@@ -6,7 +6,6 @@ from enum import Enum
 from pydantic import BaseModel, Field
 
 from crisis_room.config.gameplay import (
-    CURRENT_TURN_TIMINGS,
     NORMAL_ACTION_BUDGET,
     PUBLIC_COVERT_DEESCALATION_THRESHOLD,
     PUBLIC_COVERT_ESCALATION_THRESHOLD,
@@ -83,7 +82,6 @@ def build_batch_validation_report(
             player_entity_id=player_entity_id,
         )
     )
-    warnings.extend(_fallback_misuse_warnings(action_packages, resolver))
     return BatchValidationReport(
         warnings=_apply_player_visibility(
             _dedupe_warnings(warnings),
@@ -289,34 +287,6 @@ def _backchannel_channel_warnings(
                     ),
                 )
             )
-    return warnings
-
-
-def _fallback_misuse_warnings(
-    action_packages: list[ActionPackage],
-    resolver: ActionResolver,
-) -> list[BatchValidationWarning]:
-    warnings: list[BatchValidationWarning] = []
-    for package in action_packages:
-        if not package.fallback_condition:
-            continue
-        if package.requested_timing not in CURRENT_TURN_TIMINGS:
-            continue
-        definition = _resolve(resolver, package)
-        title = definition.title if definition is not None else package.mechanical_id
-        warnings.append(
-            BatchValidationWarning(
-                code="fallback_submitted_now",
-                actor_id=package.actor_id,
-                action_ids=[package.mechanical_id],
-                package_ids=[package.package_id],
-                message=(
-                    f"{title} includes a fallback condition but is submitted for "
-                    "current-turn execution; consider making it a clear primary "
-                    "action or holding it for later."
-                ),
-            )
-        )
     return warnings
 
 

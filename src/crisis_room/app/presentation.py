@@ -64,9 +64,16 @@ from crisis_room.engine.action_matching import (
 )
 from crisis_room.engine.adjudication import DeterministicEngineV2, DeterministicTurnResult
 from crisis_room.engine.batch_validation import BatchValidationReport, format_batch_warning
+from crisis_room.scenario.cuba import (
+    CUBA_CREDIBLE_PRESSURE_CAPABILITY_IDS,
+    CUBA_PRIVATE_EXIT_CAPABILITY_IDS,
+    CUBA_PUBLIC_LINE_CAPABILITY_IDS,
+    CUBA_RECON_OVERFLIGHTS_CAPABILITY_ID,
+)
 from crisis_room.scenario.events import ScenarioEventResolution
+from crisis_room.scenario.pressure import PressureResolution
 from crisis_room.state.advisors import AdvisorCouncilUpdate
-from crisis_room.state.backchannels import BackchannelThreadStatus
+from crisis_room.state.backchannels import BackchannelThread, BackchannelThreadStatus
 from crisis_room.state.signals import SignalChannel
 from crisis_room.state.world import EntityState, WorldStateV2
 
@@ -117,6 +124,7 @@ class TurnBriefing(BaseModel):
     situation_summary: str = ""
     problems: list[ProblemBrief] = Field(default_factory=list)
     pressure_indicators: list[PressureIndicator] = Field(default_factory=list)
+    critical_warnings: list[str] = Field(default_factory=list)
     council_read: list[str] = Field(default_factory=list)
     agenda_budget: AgendaBudget = Field(default_factory=AgendaBudget)
     action_cards: list[ActionCard] = Field(default_factory=list)
@@ -133,11 +141,15 @@ class VisibleConsequence(BaseModel):
 class TurnAftermathReport(BaseModel):
     turn_number: int
     accepted_actions: list[str] = Field(default_factory=list)
+    resolved_actions: list[str] = Field(default_factory=list)
     rejected_actions: list[str] = Field(default_factory=list)
+    resource_blocked_actions: list[str] = Field(default_factory=list)
     scheduled_actions: list[str] = Field(default_factory=list)
+    critical_warnings: list[str] = Field(default_factory=list)
     batch_warnings: list[str] = Field(default_factory=list)
     flash_events: list[str] = Field(default_factory=list)
     media_headlines: list[str] = Field(default_factory=list)
+    pressure_updates: list[str] = Field(default_factory=list)
     consequences: list[VisibleConsequence] = Field(default_factory=list)
     advisor_reactions: list[str] = Field(default_factory=list)
     npc_reactions: list[str] = Field(default_factory=list)
@@ -161,6 +173,7 @@ def build_turn_briefing(
         situation_summary=_situation_summary(world_state),
         problems=_build_problems(world_state, player_entity_id),
         pressure_indicators=_build_pressure_indicators(world_state, previous_world_state),
+        critical_warnings=_critical_risk_warnings(world_state),
         council_read=_build_council_read(world_state, player_entity_id),
         agenda_budget=AgendaBudget(
             max_actions=action_budget,
@@ -192,21 +205,39 @@ def build_turn_aftermath_report(
     batch_validation_report: BatchValidationReport | None = None,
     scenario_event_result: ScenarioEventResolution | None = None,
     event_output: AgentOutput | None = None,
+    pressure_resolution: PressureResolution | None = None,
     action_budget: int = NORMAL_ACTION_BUDGET,
 ) -> TurnAftermathReport:
     resolver = ActionResolver(action_catalog, capabilities)
+    completed_ids = {package.package_id for package in deterministic_result.completed_pending_actions}
     accepted = [
         _action_line(package, before_world_state, resolver)
         for package in deterministic_result.accepted_actions
         if package.actor_id == player_entity_id
+        and package.package_id not in completed_ids
     ]
-    rejected = [
-        _rejected_action_line(package, deterministic_result, resolver)
+    resolved = [
+        _action_line(package, before_world_state, resolver)
+        for package in deterministic_result.completed_pending_actions
+        if package.actor_id == player_entity_id
+    ]
+    rejected_packages = [
+        package
         for package in deterministic_result.rejected_actions
         if package.actor_id == player_entity_id
     ]
+    resource_blocked = [
+        _rejected_action_line(package, deterministic_result, resolver)
+        for package in rejected_packages
+        if _is_resource_blocked(package, deterministic_result)
+    ]
+    rejected = [
+        _rejected_action_line(package, deterministic_result, resolver)
+        for package in rejected_packages
+        if not _is_resource_blocked(package, deterministic_result)
+    ]
     scheduled = [
-        _action_line(package, before_world_state, resolver)
+        _action_line(package, before_world_state, resolver, include_ready_turn=True)
         for package in deterministic_result.scheduled_actions
         if package.actor_id == player_entity_id
     ]
@@ -230,11 +261,15 @@ def build_turn_aftermath_report(
     return TurnAftermathReport(
         turn_number=before_world_state.turn_number,
         accepted_actions=accepted,
+        resolved_actions=resolved,
         rejected_actions=rejected,
+        resource_blocked_actions=resource_blocked,
         scheduled_actions=scheduled,
+        critical_warnings=_critical_risk_warnings(after_world_state),
         batch_warnings=_player_batch_warnings(batch_validation_report),
         flash_events=_flash_event_lines(scenario_event_result),
         media_headlines=_media_headline_lines(event_output),
+        pressure_updates=_pressure_update_lines(pressure_resolution),
         consequences=consequences,
         advisor_reactions=_advisor_reactions(
             after_world_state,
@@ -247,13 +282,21 @@ def build_turn_aftermath_report(
     )
 
 
-def render_turn_briefing(briefing: TurnBriefing) -> str:
+def render_turn_briefing(
+    briefing: TurnBriefing,
+    *,
+    include_action_cards: bool = True,
+) -> str:
     heading = f"TURN {briefing.turn_number}"
     if briefing.time_label:
         heading = f"{heading}: {briefing.time_label}"
     lines = [heading]
     if briefing.situation_summary:
         lines.extend(["", briefing.situation_summary])
+
+    if briefing.critical_warnings:
+        lines.extend(["", "CRITICAL WARNINGS:"])
+        lines.extend(f"! {warning}" for warning in briefing.critical_warnings)
 
     lines.extend(["", "Problems on the table:"])
     for index, problem in enumerate(briefing.problems, start=1):
@@ -277,23 +320,31 @@ def render_turn_briefing(briefing: TurnBriefing) -> str:
         lines.extend(["", "Council read:"])
         lines.extend(f"- {item}" for item in briefing.council_read)
 
-    lines.extend(["", "Action cards:"])
+    if include_action_cards:
+        lines.extend(["", *render_action_cards(briefing).splitlines()])
+    else:
+        lines.extend(["", "Action cards hidden. Type ACTIONS for the full catalog."])
+    return "\n".join(lines)
+
+
+def render_action_cards(briefing: TurnBriefing) -> str:
+    lines = ["Action cards:"]
+    if not briefing.action_cards:
+        lines.append("No action cards are currently available.")
+        return "\n".join(lines)
     for card in briefing.action_cards:
-        status = "" if card.legal_now else " [LOCKED]"
-        lines.append(f"- [{card.category}] {card.title}{status}")
-        if card.cost_summary:
-            lines.append(f"  Cost: {card.cost_summary}")
-        if card.expected_pressure_summary:
-            lines.append(f"  Expected pressure: {card.expected_pressure_summary}")
-        if card.risk_summary:
-            lines.append(f"  Risk: {card.risk_summary}")
-        if card.locked_reason:
-            lines.append(f"  Locked: {card.locked_reason}")
+        _append_action_card_lines(lines, card)
     return "\n".join(lines)
 
 
 def render_aftermath_report(report: TurnAftermathReport) -> str:
     lines = ["RESULTS"]
+    if report.critical_warnings:
+        lines.extend(["", "CRITICAL WARNINGS:"])
+        lines.extend(f"! {warning}" for warning in report.critical_warnings)
+    if report.resolved_actions:
+        lines.extend(["", "Resolved from pending:"])
+        lines.extend(f"- {item}" for item in report.resolved_actions)
     if report.accepted_actions:
         lines.extend(["", "Accepted:"])
         lines.extend(f"- {item}" for item in report.accepted_actions)
@@ -303,6 +354,9 @@ def render_aftermath_report(report: TurnAftermathReport) -> str:
     if report.rejected_actions:
         lines.extend(["", "Rejected:"])
         lines.extend(f"- {item}" for item in report.rejected_actions)
+    if report.resource_blocked_actions:
+        lines.extend(["", "Blocked by resources:"])
+        lines.extend(f"- {item}" for item in report.resource_blocked_actions)
     if report.batch_warnings:
         lines.extend(["", "Agenda warnings:"])
         lines.extend(f"- {warning}" for warning in report.batch_warnings)
@@ -311,12 +365,32 @@ def render_aftermath_report(report: TurnAftermathReport) -> str:
         lines.extend(f"- {item}" for item in report.flash_events)
     if report.media_headlines:
         lines.extend(["", "Media desk:"])
-        lines.extend(f"- {item}" for item in report.media_headlines)
+        lines.append(f"- {_media_scan_line(report.media_headlines[0])}")
+        remaining = len(report.media_headlines) - 1
+        if remaining > 0:
+            suffix = "update" if remaining == 1 else "updates"
+            lines.append(
+                f"- {remaining} more media {suffix}. "
+                "Type MEDIA for the full public timeline."
+            )
+    if report.pressure_updates:
+        lines.extend(["", "Internal pressure:"])
+        lines.extend(f"- {item}" for item in report.pressure_updates)
     if report.consequences:
-        lines.extend(["", "Immediate consequences:"])
-        for consequence in report.consequences:
-            lines.append(f"- {consequence.title}: {consequence.summary}")
-            lines.extend(f"  {change}" for change in consequence.visible_metric_changes)
+        observed = [item for item in report.consequences if _is_observed_shift(item)]
+        drivers = [item for item in report.consequences if not _is_observed_shift(item)]
+        if observed:
+            lines.extend(["", "Observed shifts this turn:"])
+            for consequence in observed:
+                if consequence.visible_metric_changes:
+                    lines.extend(f"- {change}" for change in consequence.visible_metric_changes)
+                else:
+                    lines.append(f"- {consequence.summary}")
+        if drivers:
+            lines.extend(["", "Possible drivers:"])
+            for consequence in drivers:
+                lines.append(f"- {consequence.title}: {consequence.summary}")
+                lines.extend(f"  Reported pressure: {change}" for change in consequence.visible_metric_changes)
     if report.advisor_reactions:
         lines.extend(["", "Council reaction:"])
         lines.extend(f"- {reaction}" for reaction in report.advisor_reactions)
@@ -327,6 +401,78 @@ def render_aftermath_report(report: TurnAftermathReport) -> str:
         lines.extend(["", "New problems:"])
         lines.extend(f"- {problem.title}: {problem.summary}" for problem in report.new_problems)
     return "\n".join(lines)
+
+
+def render_public_timeline(world_state: WorldStateV2, *, limit: int = 8) -> str:
+    lines = ["MEDIA"]
+    entries = world_state.public_timeline.latest(limit)
+    if not entries:
+        lines.append("No public media updates yet.")
+        return "\n".join(lines)
+    for entry in entries:
+        lines.append(f"- Turn {entry.turn}: {entry.title}")
+        if entry.summary:
+            lines.append(f"  {entry.summary}")
+    return "\n".join(lines)
+
+
+def render_advisor_council(
+    world_state: WorldStateV2,
+    player_entity_id: str,
+    *,
+    debug_mode: bool = False,
+) -> str:
+    council = world_state.advisor_councils.get(player_entity_id)
+    if council is None:
+        return "No persistent advisor council is initialized."
+    lines = ["ADVISOR COUNCIL"]
+    for advisor in council.advisors.values():
+        trusted_channel = _advisor_trusted_channel(advisor.trust_channels)
+        belief = next(iter(advisor.beliefs.values()), None)
+        if debug_mode:
+            lines.append(
+                f"- {advisor.name}: trust {advisor.trust_player:.0%}, "
+                f"urgency {advisor.urgency:.0%}, paranoia {advisor.paranoia:.0%}, "
+                f"trusted channel {trusted_channel}"
+            )
+        else:
+            lines.append(
+                f"- {advisor.name}: {_advisor_trust_read(advisor.trust_player)} trust, "
+                f"{_advisor_display_pressure(advisor.urgency)} urgency, "
+                f"{_advisor_display_pressure(advisor.paranoia)} caution, "
+                f"trusts {trusted_channel}"
+            )
+        if belief is not None:
+            lines.append(f"  Belief: {belief.summary}")
+        if advisor.recent_recommendations:
+            lines.append(f"  Recent recommendation: {advisor.recent_recommendations[-1]}")
+        if advisor.recent_embarrassments:
+            lines.append(f"  Concern: {advisor.recent_embarrassments[-1]}")
+    return "\n".join(lines)
+
+
+def _append_action_card_lines(lines: list[str], card: ActionCard) -> None:
+    status = "" if card.legal_now else " [LOCKED]"
+    lines.append(f"- [{card.category}] {card.title}{status}")
+    if card.cost_summary:
+        lines.append(f"  Cost: {card.cost_summary}")
+    if card.expected_pressure_summary:
+        lines.append(f"  Expected pressure: {card.expected_pressure_summary}")
+    if card.risk_summary:
+        lines.append(f"  Risk: {card.risk_summary}")
+    if card.locked_reason:
+        lines.append(f"  Locked: {card.locked_reason}")
+
+
+def _media_scan_line(item: str) -> str:
+    title, separator, _summary = item.partition(":")
+    if separator:
+        return title.strip()
+    return item.strip()
+
+
+def _is_observed_shift(consequence: VisibleConsequence) -> bool:
+    return consequence.source_package_id == "observed_turn_shift"
 
 
 def _situation_summary(world_state: WorldStateV2) -> str:
@@ -427,6 +573,7 @@ def _backchannel_problems(
         for thread in world_state.backchannel_threads.values()
         if player_entity_id in thread.participant_entity_ids
         and thread.status == BackchannelThreadStatus.OPEN
+        and thread.expires_turn >= world_state.turn_number
     ]
     open_threads.sort(key=lambda thread: (thread.expires_turn, -thread.last_active_turn))
     for thread in open_threads[:BACKCHANNEL_PROBLEM_LIMIT]:
@@ -446,9 +593,13 @@ def _backchannel_problems(
             "high" if turns_left <= BACKCHANNEL_EXPIRING_TURN_WINDOW else "medium"
         )
         latest = thread.message_records[-1].summary if thread.message_records else ""
-        summary = f"The channel to {counterpart} is open until turn {thread.expires_turn}."
+        opened_by = _backchannel_opened_by(thread, world_state, player_entity_id)
+        summary = (
+            f"Opened by {opened_by}. The channel to {counterpart} "
+            f"is open through turn {thread.expires_turn}."
+        )
         if latest:
-            summary = f"{summary} Latest exchange: {latest}"
+            summary = f"{summary} Latest reported exchange: {latest}"
         problems.append(
             ProblemBrief(
                 problem_id=f"backchannel:{thread.thread_id}",
@@ -519,66 +670,99 @@ def _build_pressure_indicators(
     world_state: WorldStateV2,
     previous_world_state: WorldStateV2 | None,
 ) -> list[PressureIndicator]:
-    escalation = _average(
-        world_state.truth_metrics.get("escalation_pressure"),
-        world_state.hidden_clocks.get("nuclear_escalation"),
-    )
-    previous_escalation = _previous_average(
-        previous_world_state,
-        "escalation_pressure",
-        "nuclear_escalation",
-    )
-    backchannel = float(
-        world_state.hidden_clocks.get(
-            "backchannel_viability",
-            DEFAULT_UNKNOWN_PROBABILITY,
-        )
-    )
-    previous_backchannel = (
-        float(
-            previous_world_state.hidden_clocks.get(
-                "backchannel_viability",
-                DEFAULT_UNKNOWN_PROBABILITY,
-            )
-        )
-        if previous_world_state is not None
-        else None
-    )
-    alliance = _average(
-        world_state.truth_metrics.get("alliance_cohesion"),
-        world_state.public_metrics.get("allied_confidence"),
-    )
-    previous_alliance = _previous_average(
-        previous_world_state,
-        "alliance_cohesion",
-        public_key="allied_confidence",
-    )
-    command = float(
-        world_state.hidden_clocks.get(
+    escalation = _composite_pressure(
+        world_state,
+        truth_keys=(
+            "escalation_pressure",
+            "missile_operational_progress",
+            "hawk_pressure",
+        ),
+        public_keys=("public_alarm", "market_anxiety"),
+        clock_keys=(
+            "nuclear_escalation",
             "command_and_control_risk",
-            DEFAULT_UNKNOWN_PROBABILITY,
-        )
+            "quarantine_incident_risk",
+            "invasion_momentum",
+        ),
     )
-    previous_command = (
-        float(
-            previous_world_state.hidden_clocks.get(
-                "command_and_control_risk",
-                DEFAULT_UNKNOWN_PROBABILITY,
-            )
-        )
-        if previous_world_state is not None
-        else None
+    previous_escalation = _previous_composite_pressure(
+        previous_world_state,
+        truth_keys=(
+            "escalation_pressure",
+            "missile_operational_progress",
+            "hawk_pressure",
+        ),
+        public_keys=("public_alarm", "market_anxiety"),
+        clock_keys=(
+            "nuclear_escalation",
+            "command_and_control_risk",
+            "quarantine_incident_risk",
+            "invasion_momentum",
+        ),
     )
-    alarm = float(world_state.public_metrics.get("public_alarm", DEFAULT_UNKNOWN_METRIC_VALUE))
-    previous_alarm = (
-        float(
-            previous_world_state.public_metrics.get(
-                "public_alarm",
-                DEFAULT_UNKNOWN_METRIC_VALUE,
-            )
-        )
-        if previous_world_state is not None
-        else None
+    backchannel = _composite_pressure(
+        world_state,
+        truth_keys=("leak_pressure", "perceived_weakness", "soviet_face_saving_need"),
+        public_keys=("public_alarm", "press_alarm"),
+        clock_keys=("nuclear_escalation",),
+        inverse_truth_keys=("diplomatic_offramp",),
+        inverse_clock_keys=("backchannel_viability",),
+    )
+    previous_backchannel = _previous_composite_pressure(
+        previous_world_state,
+        truth_keys=("leak_pressure", "perceived_weakness", "soviet_face_saving_need"),
+        public_keys=("public_alarm", "press_alarm"),
+        clock_keys=("nuclear_escalation",),
+        inverse_truth_keys=("diplomatic_offramp",),
+        inverse_clock_keys=("backchannel_viability",),
+    )
+    alliance = _composite_pressure(
+        world_state,
+        truth_keys=("leak_pressure", "perceived_weakness"),
+        public_keys=("public_alarm",),
+        inverse_truth_keys=("alliance_cohesion",),
+        inverse_public_keys=("allied_confidence",),
+    )
+    previous_alliance = _previous_composite_pressure(
+        previous_world_state,
+        truth_keys=("leak_pressure", "perceived_weakness"),
+        public_keys=("public_alarm",),
+        inverse_truth_keys=("alliance_cohesion",),
+        inverse_public_keys=("allied_confidence",),
+    )
+    command = _composite_pressure(
+        world_state,
+        truth_keys=("missile_operational_progress", "verification_gap"),
+        public_keys=("public_alarm",),
+        clock_keys=(
+            "command_and_control_risk",
+            "quarantine_incident_risk",
+            "nuclear_escalation",
+            "invasion_momentum",
+        ),
+    )
+    previous_command = _previous_composite_pressure(
+        previous_world_state,
+        truth_keys=("missile_operational_progress", "verification_gap"),
+        public_keys=("public_alarm",),
+        clock_keys=(
+            "command_and_control_risk",
+            "quarantine_incident_risk",
+            "nuclear_escalation",
+            "invasion_momentum",
+        ),
+    )
+    alarm = _composite_pressure(
+        world_state,
+        truth_keys=("leak_pressure",),
+        public_keys=("public_alarm", "press_alarm", "market_anxiety"),
+        inverse_public_keys=("public_confidence", "allied_confidence"),
+    )
+    previous_alarm = _previous_composite_pressure(
+        previous_world_state,
+        truth_keys=("leak_pressure",),
+        public_keys=("public_alarm", "press_alarm", "market_anxiety"),
+        inverse_public_keys=("public_confidence", "allied_confidence"),
     )
     return [
         PressureIndicator(
@@ -591,16 +775,16 @@ def _build_pressure_indicators(
         ),
         PressureIndicator(
             key="backchannel_viability",
-            label="Backchannel viability",
-            band=_risk_band(MAX_PROBABILITY - backchannel),
+            label="Backchannel fragility",
+            band=_risk_band(backchannel),
             trend=_trend(backchannel, previous_backchannel),
             confidence="uncertain",
             visible_summary="Private channels look better when quiet probes and concessions stay credible.",
         ),
         PressureIndicator(
             key="alliance_cohesion",
-            label="Alliance cohesion",
-            band=_risk_band(MAX_PROBABILITY - alliance),
+            label="Alliance strain",
+            band=_risk_band(alliance),
             trend=_trend(alliance, previous_alliance),
             confidence="inferred",
             visible_summary="Allied support depends on consultation and public legitimacy.",
@@ -622,6 +806,48 @@ def _build_pressure_indicators(
             visible_summary="Public-facing anxiety shapes how much room remains for bargaining.",
         ),
     ]
+
+
+def _composite_pressure(
+    world_state: WorldStateV2,
+    *,
+    truth_keys: tuple[str, ...] = (),
+    public_keys: tuple[str, ...] = (),
+    clock_keys: tuple[str, ...] = (),
+    inverse_truth_keys: tuple[str, ...] = (),
+    inverse_public_keys: tuple[str, ...] = (),
+    inverse_clock_keys: tuple[str, ...] = (),
+) -> float:
+    values = [
+        *(world_state.truth_metrics.get(key) for key in truth_keys),
+        *(world_state.public_metrics.get(key) for key in public_keys),
+        *(world_state.hidden_clocks.get(key) for key in clock_keys),
+        *(
+            MAX_PROBABILITY - world_state.truth_metrics[key]
+            for key in inverse_truth_keys
+            if key in world_state.truth_metrics
+        ),
+        *(
+            MAX_PROBABILITY - world_state.public_metrics[key]
+            for key in inverse_public_keys
+            if key in world_state.public_metrics
+        ),
+        *(
+            MAX_PROBABILITY - world_state.hidden_clocks[key]
+            for key in inverse_clock_keys
+            if key in world_state.hidden_clocks
+        ),
+    ]
+    return _average(*values)
+
+
+def _previous_composite_pressure(
+    previous_world_state: WorldStateV2 | None,
+    **kwargs: tuple[str, ...],
+) -> float | None:
+    if previous_world_state is None:
+        return None
+    return _composite_pressure(previous_world_state, **kwargs)
 
 
 def _build_council_read(world_state: WorldStateV2, player_entity_id: str) -> list[str]:
@@ -704,6 +930,16 @@ def _build_consequences(
 ) -> list[VisibleConsequence]:
     consequences: list[VisibleConsequence] = []
     metric_changes = _metric_change_lines(before_world_state, after_world_state)
+    if metric_changes:
+        consequences.append(
+            VisibleConsequence(
+                title="Observed shifts this turn",
+                summary="Reports and internal reads point to these shifts.",
+                severity="moderate",
+                source_package_id="observed_turn_shift",
+                visible_metric_changes=metric_changes[:VISIBLE_CONSEQUENCE_METRIC_LIMIT],
+            )
+        )
     for package in deterministic_result.accepted_actions:
         if package.actor_id != player_entity_id:
             continue
@@ -712,14 +948,13 @@ def _build_consequences(
         consequences.append(
             VisibleConsequence(
                 title=title,
-                summary=package.intent_summary,
+                summary=f"{package.intent_summary} [{_driver_read(package)}]",
                 severity=_severity(
                     definition.escalation_risk
                     if definition is not None
                     else DEFAULT_VISIBLE_CONSEQUENCE_RISK
                 ),
                 source_package_id=package.package_id,
-                visible_metric_changes=metric_changes[:VISIBLE_CONSEQUENCE_METRIC_LIMIT],
             )
         )
     if scenario_event_result is not None:
@@ -727,21 +962,22 @@ def _build_consequences(
             consequences.append(
                 VisibleConsequence(
                     title=record.title,
-                summary=record.summary,
-                severity=_event_severity(record.urgency),
-                visible_metric_changes=_public_event_effect_lines(record.effect_summary),
+                    summary=f"{record.summary} [reported source; medium confidence]",
+                    severity=_event_severity(record.urgency),
+                    visible_metric_changes=_public_event_effect_lines(record.effect_summary),
                 )
             )
-    if not consequences and metric_changes:
-        consequences.append(
-            VisibleConsequence(
-                title="Situation shifted",
-                summary="The turn changed visible pressure even without an accepted player action.",
-                severity="moderate",
-                visible_metric_changes=metric_changes[:VISIBLE_CONSEQUENCE_METRIC_LIMIT],
-            )
-        )
     return consequences
+
+
+def _driver_read(package: ActionPackage) -> str:
+    if package.channel in {SignalChannel.PUBLIC, SignalChannel.MEDIA}:
+        return "visible source; high confidence"
+    if package.channel in {SignalChannel.INTEL, SignalChannel.MILITARY}:
+        return "operational source; medium confidence"
+    if package.channel == SignalChannel.BACKCHANNEL:
+        return "private source; low confidence"
+    return "private source; medium confidence"
 
 
 def _player_batch_warnings(
@@ -777,6 +1013,34 @@ def _media_headline_lines(event_output: AgentOutput | None) -> list[str]:
     ]
 
 
+def _pressure_update_lines(
+    pressure_resolution: PressureResolution | None,
+) -> list[str]:
+    if pressure_resolution is None:
+        return []
+    lines: list[str] = []
+    for application in pressure_resolution.applications:
+        if application.hidden:
+            continue
+        if application.summary:
+            lines.append(application.summary)
+    return lines[:AFTERMATH_REACTION_LIMIT]
+
+
+def _backchannel_opened_by(
+    thread: BackchannelThread,
+    world_state: WorldStateV2,
+    player_entity_id: str,
+) -> str:
+    sender = str(thread.metadata.get("opened_by") or "")
+    if not sender and thread.message_records:
+        sender = thread.message_records[0].sender_entity_id
+    if sender == player_entity_id:
+        return "you"
+    actor = world_state.actors.get(sender)
+    return actor.name if actor is not None else (sender or "an unclear source")
+
+
 def _advisor_reactions(
     world_state: WorldStateV2,
     player_entity_id: str,
@@ -800,24 +1064,13 @@ def _advisor_reactions(
     if not player_action_ids:
         reactions.append("The council reads the pause as useful only if it preserves initiative.")
         return reactions[:AFTERMATH_REACTION_LIMIT]
-    if player_action_ids & {
-        "cuba_open_kremlin_channel",
-        "cuba_offer_non_invasion_pledge",
-        "cuba_secret_jupiter_trade",
-    }:
+    if player_action_ids & CUBA_PRIVATE_EXIT_CAPABILITY_IDS:
         reactions.append("State says the private exit remains the room's most valuable asset.")
-    if player_action_ids & {
-        "cuba_announce_naval_quarantine",
-        "cuba_raise_defcon_readiness",
-        "cuba_prepare_air_strike",
-    }:
+    if player_action_ids & CUBA_CREDIBLE_PRESSURE_CAPABILITY_IDS:
         reactions.append("Defense says pressure is now credible and must be tightly controlled.")
-    if "cuba_recon_overflights" in player_action_ids:
+    if CUBA_RECON_OVERFLIGHTS_CAPABILITY_ID in player_action_ids:
         reactions.append("Intelligence warns that better sight also raises local shootdown risk.")
-    if player_action_ids & {
-        "cuba_public_withdrawal_demand",
-        "cuba_announce_naval_quarantine",
-    }:
+    if player_action_ids & CUBA_PUBLIC_LINE_CAPABILITY_IDS:
         reactions.append("Political wants the public line disciplined before it hardens into a trap.")
     return reactions[:AFTERMATH_REACTION_LIMIT]
 
@@ -829,8 +1082,7 @@ def _npc_reactions(
     reactions: list[str] = []
     for entity_id, output in agent_outputs.items():
         if output.action_package is None:
-            if output.debug_notes:
-                reactions.append(f"{entity_id} attempted no valid action: {output.debug_notes[0]}")
+            reactions.append(f"{entity_id}: no effective move")
             continue
         definition = _resolve_definition(resolver, output.action_package)
         title = definition.title if definition is not None else output.action_package.mechanical_id
@@ -842,12 +1094,19 @@ def _action_line(
     package: ActionPackage,
     world_state: WorldStateV2,
     resolver: ActionResolver,
+    *,
+    include_ready_turn: bool = False,
 ) -> str:
     definition = _resolve_definition(resolver, package)
     title = definition.title if definition is not None else package.mechanical_id
     actor = world_state.actors.get(package.actor_id)
     actor_name = actor.name if actor is not None else package.actor_id
-    return f"{actor_name}: {title} via {package.channel.value}"
+    line = f"{actor_name}: {title} via {package.channel.value}"
+    if include_ready_turn:
+        ready_turn = package.metadata.get("ready_turn")
+        if isinstance(ready_turn, int):
+            line += f" — resolves on turn {ready_turn}"
+    return line
 
 
 def _rejected_action_line(
@@ -860,6 +1119,38 @@ def _rejected_action_line(
     validation = deterministic_result.validation_results.get(package.package_id)
     reason = "; ".join(validation.errors) if validation is not None else "failed validation"
     return f"{title}: {reason}"
+
+
+def _is_resource_blocked(
+    package: ActionPackage,
+    deterministic_result: DeterministicTurnResult,
+) -> bool:
+    validation = deterministic_result.validation_results.get(package.package_id)
+    return bool(
+        validation
+        and any("insufficient resources:" in error for error in validation.errors)
+    )
+
+
+def _critical_risk_warnings(world_state: WorldStateV2) -> list[str]:
+    warnings: list[str] = []
+    nuclear = world_state.hidden_clocks.get("nuclear_escalation")
+    if nuclear is not None and nuclear >= 0.75:
+        warnings.append(
+            "Nuclear Exchange threshold is near: "
+            f"nuclear escalation risk is {nuclear:.2f} (offer threshold 0.90)."
+        )
+    command = world_state.hidden_clocks.get("command_and_control_risk")
+    if command is not None and command >= HIGH_RISK_BAND_THRESHOLD:
+        warnings.append(
+            f"Command-control risk is critical at {command:.2f}; local action may outrun national orders."
+        )
+    alarm = world_state.public_metrics.get("public_alarm")
+    if alarm is not None and alarm >= HIGH_RISK_BAND_THRESHOLD:
+        warnings.append(
+            f"Public alarm is critical at {alarm:.2f}; another major escalation may close political options."
+        )
+    return warnings
 
 
 def _metric_change_lines(before: WorldStateV2, after: WorldStateV2) -> list[str]:
@@ -1136,6 +1427,33 @@ def _advisor_pressure(value: float) -> str:
         return "rising"
     if value >= GUARDED_ADVISOR_PRESSURE_THRESHOLD:
         return "measured"
+    return "low"
+
+
+def _advisor_trusted_channel(channels: dict[str, float]) -> str:
+    if not channels:
+        return "uncertain"
+    channel, _ = max(channels.items(), key=lambda item: item[1])
+    return channel.replace("_", " ")
+
+
+def _advisor_trust_read(value: float) -> str:
+    if value >= 0.72:
+        return "strong"
+    if value >= 0.55:
+        return "steady"
+    if value >= 0.38:
+        return "fragile"
+    return "strained"
+
+
+def _advisor_display_pressure(value: float) -> str:
+    if value >= 0.75:
+        return "high"
+    if value >= 0.55:
+        return "rising"
+    if value >= 0.35:
+        return "guarded"
     return "low"
 
 

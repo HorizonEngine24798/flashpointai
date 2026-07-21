@@ -10,7 +10,7 @@ from crisis_room.config.settings import LlamaCppSettings, load_settings
 from crisis_room.llm.llama_cpp_client import LlamaCppServerClient
 from crisis_room.llm.preflight import build_preflight_report, start_preflight_server
 from crisis_room.llm.smoke import run_smoke
-from crisis_room.scenario.schema import build_cuban_missile_crisis_1962_scenario
+from crisis_room.scenario.cuba import build_cuban_missile_crisis_1962_scenario
 
 
 pytestmark = [

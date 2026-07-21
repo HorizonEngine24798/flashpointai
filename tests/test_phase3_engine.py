@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from crisis_room.engine import ActionPackage, DeterministicEngineV2
 from crisis_room.engine.actions import ActionCategory, ActionDefinition
-from crisis_room.scenario.schema import build_cuban_missile_crisis_1962_scenario
+from crisis_room.scenario.cuba import build_cuban_missile_crisis_1962_scenario
 from crisis_room.state.signals import PayloadType, SignalChannel, SignalVisibility
 
 
@@ -93,6 +93,31 @@ def test_engine_v2_public_action_writes_public_timeline() -> None:
     assert result.emitted_signals[0].recipient_entity_ids == []
     assert result.emitted_signals[0].visibility == SignalVisibility.PUBLIC
     assert resolved.public_metrics["public_alarm"] == 0.42
+
+
+def test_engine_v2_unorthodox_gambit_uses_premise_in_signal_and_timelines() -> None:
+    scenario = build_cuban_missile_crisis_1962_scenario()
+    world = scenario.create_initial_world(rng_seed=121)
+    engine = DeterministicEngineV2(scenario.action_catalog, scenario.capabilities)
+    premise = "Announce that alien observers caused the missile deployment."
+    action = ActionPackage(
+        package_id="pkg_weird",
+        actor_id="us_excomm",
+        action_id="information_operation",
+        capability_id="cuba_unorthodox_gambit",
+        target_ids=[],
+        channel=SignalChannel.RUMOR,
+        intent_summary="Pursue an unorthodox crisis gambit.",
+        parameters={"premise": premise},
+    )
+
+    result = engine.resolve_actions(world, [action])
+    resolved = result.world_state
+
+    assert result.emitted_signals[0].content == premise
+    assert result.emitted_signals[0].metadata["premise"] == premise
+    assert premise in resolved.omniscient_timeline.entries[-1].summary
+    assert resolved.public_timeline.entries[-1].summary == premise
 
 
 def test_engine_v2_schedules_and_completes_prepared_action_without_double_cost() -> None:

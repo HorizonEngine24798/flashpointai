@@ -14,7 +14,7 @@ def main(argv: list[str] | None = None) -> None:
     if args and args[0] == "llm-smoke":
         smoke_main(args[1:])
         return
-    if args and args[0] in {"tui", "legacy-tui"}:
+    if args and args[0] == "tui":
         from crisis_room.app.tui import main as tui_main
 
         tui_main(args[1:])

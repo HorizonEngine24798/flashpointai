@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from crisis_room.agents.context import build_task_request
 from crisis_room.llm.contracts import LLMClient
+from crisis_room.llm.prompts import INFO_CHANNEL_SYSTEM, INFO_CHANNEL_TASK
 from crisis_room.llm.task_contracts import SignalDistortionResponse
 from crisis_room.state.signals import (
     PayloadType,
@@ -292,11 +293,7 @@ class PrototypeInfoChannel:
             return fallback, ""
         request = build_task_request(
             label=f"info_channel.{signal.signal_id}.{kind}",
-            system_prompt=(
-                "You are the communications noise layer in a crisis simulation. "
-                "Rewrite the message as it is actually observed after channel "
-                "unreliability."
-            ),
+            system_prompt=INFO_CHANNEL_SYSTEM,
             visible_context={
                 "scenario_id": world_state.scenario_id,
                 "turn_number": world_state.turn_number,
@@ -310,12 +307,7 @@ class PrototypeInfoChannel:
                 "original_content": signal.content,
                 "observed_reliability": reliability,
             },
-            task_instruction=(
-                "Return the message text recipients observe. Make the distortion "
-                "substantive but plausible: ambiguity, missing qualifiers, garbled "
-                "causality, softened or hardened intent, or conflicting sourcing. "
-                "Do not simply prefix the original text."
-            ),
+            task_instruction=INFO_CHANNEL_TASK,
             response_schema_name="SignalDistortionResponse",
             metadata={
                 "agent": "info_channel",

@@ -279,6 +279,8 @@ class DeterministicEngineV2:
                     "resource_costs_paid": True,
                     "action_definition_id": definition.action_id,
                     "capability_id": definition.capability_id or "",
+                    "action_category": definition.category.value,
+                    "action_tags": ",".join(definition.event_hooks),
                 }
             )
             world_state.pending_actions.append(scheduled)
@@ -313,6 +315,18 @@ class DeterministicEngineV2:
         pay_resource_costs: bool,
         pending_completion: bool,
     ) -> None:
+        action_package = action_package.model_copy(
+            deep=True,
+            update={
+                "metadata": {
+                    **action_package.metadata,
+                    "action_definition_id": definition.action_id,
+                    "capability_id": definition.capability_id or "",
+                    "action_category": definition.category.value,
+                    "action_tags": ",".join(definition.event_hooks),
+                }
+            },
+        )
         if pay_resource_costs:
             self._apply_submission_costs(world_state, result, action_package, definition)
         actor = world_state.actors[action_package.actor_id]
@@ -356,7 +370,6 @@ class DeterministicEngineV2:
         )
 
         signal = self._action_signal(world_state, action_package, definition)
-        actor.outbox.append(signal)
         result.emitted_signals.append(signal)
         result.accepted_actions.append(action_package)
         if pending_completion:
@@ -513,7 +526,7 @@ class DeterministicEngineV2:
                 title=definition.omniscient_timeline_title or "Action Resolved",
                 summary=(
                     f"{actor.name} executed {definition.title}: "
-                    f"{action_package.intent_summary}"
+                    f"{_action_summary(action_package)}"
                 ),
                 source="deterministic_engine_v2",
                 signal_ids=[signal.signal_id],
@@ -538,7 +551,10 @@ class DeterministicEngineV2:
                     turn=world_state.turn_number,
                     scope=TimelineScope.PUBLIC,
                     title=definition.public_timeline_title or "Public Action",
-                    summary=action_package.public_rationale or action_package.intent_summary,
+                summary=_action_summary(
+                    action_package,
+                    prefer_public_rationale=True,
+                ),
                     source=action_package.actor_id,
                     signal_ids=[signal.signal_id],
                     tags=["action", "public", definition.category.value],
@@ -559,15 +575,18 @@ class DeterministicEngineV2:
     ) -> Signal:
         payload_type = _payload_type_for(action_package.channel, definition)
         visibility = _visibility_for(action_package.channel)
-        content = action_package.intent_summary
-        if visibility == SignalVisibility.PUBLIC and action_package.public_rationale:
+        premise = _action_premise(action_package)
+        content = premise or action_package.intent_summary
+        if not premise and visibility == SignalVisibility.PUBLIC and action_package.public_rationale:
             content = action_package.public_rationale
-        elif action_package.private_rationale:
+        elif not premise and action_package.private_rationale:
             content = action_package.intent_summary
         metadata: dict[str, str | int | float | bool] = {
             "action_id": action_package.action_id,
             "capability_id": definition.capability_id or "",
         }
+        if premise:
+            metadata["premise"] = premise
         leak_risk = definition.signal_leak_risk
         thread_id = action_package.metadata.get("backchannel_thread_id")
         if action_package.metadata.get("direct_backchannel_message") and isinstance(
@@ -652,6 +671,24 @@ _OPERATORS = {
 
 def _definition_id(definition: ActionDefinition) -> str:
     return definition.capability_id or definition.action_id
+
+
+def _action_premise(action_package: ActionPackage) -> str:
+    premise = action_package.parameters.get("premise")
+    return premise.strip() if isinstance(premise, str) else ""
+
+
+def _action_summary(
+    action_package: ActionPackage,
+    *,
+    prefer_public_rationale: bool = False,
+) -> str:
+    premise = _action_premise(action_package)
+    if premise:
+        return premise
+    if prefer_public_rationale and action_package.public_rationale:
+        return action_package.public_rationale
+    return action_package.intent_summary
 
 
 def _evaluate_precondition(
@@ -768,107 +805,3 @@ def _visibility_for(channel: SignalChannel) -> SignalVisibility:
 
 def _deterministic_time(turn_number: int) -> datetime:
     return datetime.fromtimestamp(turn_number, tz=timezone.utc)
-
-
-class FakeDeterministicEngine:
-    """Small deterministic resolver for Phase 1 integration tests and debug TUI."""
-
-    def validate_action(
-        self,
-        world_state: WorldStateV2,
-        action_package: ActionPackage,
-    ) -> ActionValidationResult:
-        errors: list[str] = []
-        if action_package.actor_id not in world_state.actors:
-            errors.append(f"unknown actor: {action_package.actor_id}")
-        if not action_package.intent_summary.strip():
-            errors.append("intent summary is empty")
-        missing_targets = [
-            target_id
-            for target_id in action_package.target_ids
-            if target_id not in world_state.actors
-        ]
-        if missing_targets:
-            errors.append(f"unknown target(s): {', '.join(missing_targets)}")
-        return ActionValidationResult(is_valid=not errors, errors=errors)
-
-    def resolve_actions(
-        self,
-        world_state: WorldStateV2,
-        action_packages: list[ActionPackage],
-    ) -> DeterministicTurnResult:
-        next_world = world_state.model_copy(deep=True)
-        result = DeterministicTurnResult(world_state=next_world)
-        for action_package in action_packages:
-            validation = self.validate_action(next_world, action_package)
-            if not validation.is_valid:
-                result.rejected_actions.append(action_package)
-                result.trace.extend(validation.errors)
-                continue
-
-            actor = next_world.actors[action_package.actor_id]
-            result.accepted_actions.append(action_package)
-            next_world.omniscient_timeline.append(
-                TimelineEntry(
-                    turn=next_world.turn_number,
-                    scope=TimelineScope.OMNISCIENT,
-                    title="Action Resolved",
-                    summary=(
-                        f"{actor.name} submitted {action_package.action_id}: "
-                        f"{action_package.intent_summary}"
-                    ),
-                    source="fake_deterministic_engine",
-                    tags=["action", action_package.channel.value],
-                    metadata={"package_id": action_package.package_id},
-                )
-            )
-            if action_package.channel == SignalChannel.PUBLIC:
-                next_world.public_timeline.append(
-                    TimelineEntry(
-                        turn=next_world.turn_number,
-                        scope=TimelineScope.PUBLIC,
-                        title="Public Statement",
-                        summary=action_package.public_rationale or action_package.intent_summary,
-                        source=actor.entity_id,
-                        tags=["action", "public"],
-                    )
-                )
-
-            signal = self._action_signal(next_world, action_package)
-            result.emitted_signals.append(signal)
-            actor.outbox.append(signal)
-            result.trace.append(
-                f"accepted {action_package.package_id} and emitted {signal.signal_id}"
-            )
-        result.world_state = next_world
-        return result
-
-    def _action_signal(
-        self,
-        world_state: WorldStateV2,
-        action_package: ActionPackage,
-    ) -> Signal:
-        is_public = action_package.channel == SignalChannel.PUBLIC
-        payload_type = (
-            PayloadType.PUBLIC_STATEMENT
-            if is_public
-            else PayloadType.PRIVATE_DIPLOMATIC_MESSAGE
-        )
-        visibility = SignalVisibility.PUBLIC if is_public else SignalVisibility.PRIVATE
-        recipients = [] if is_public else action_package.target_ids
-        return Signal(
-            signal_id=f"sig_turn_{world_state.turn_number}_{action_package.package_id}",
-            source_entity_id=action_package.actor_id,
-            recipient_entity_ids=recipients,
-            channel=action_package.channel,
-            payload_type=payload_type,
-            content=action_package.intent_summary,
-            truth_reference_id=action_package.package_id,
-            emitted_turn=world_state.turn_number,
-            intended_arrival_turn=world_state.turn_number,
-            visibility=visibility,
-            reliability=1.0,
-            leak_risk=0.1 if not is_public else 0.0,
-            distortion_risk=0.2 if not is_public else 0.0,
-            classification="public" if is_public else "confidential",
-        )

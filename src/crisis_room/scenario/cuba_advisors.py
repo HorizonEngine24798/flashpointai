@@ -23,7 +23,6 @@ def initial_us_excomm_advisor_council() -> AdvisorCouncilState:
                 },
                 paranoia=0.38,
                 urgency=0.42,
-                corruption=0.08,
                 institutional_confidence=0.7,
                 beliefs={
                     "face_saving": AdvisorBelief(
@@ -50,7 +49,6 @@ def initial_us_excomm_advisor_council() -> AdvisorCouncilState:
                 },
                 paranoia=0.52,
                 urgency=0.76,
-                corruption=0.05,
                 institutional_confidence=0.74,
                 beliefs={
                     "delay_risk": AdvisorBelief(
@@ -77,7 +75,6 @@ def initial_us_excomm_advisor_council() -> AdvisorCouncilState:
                 },
                 paranoia=0.72,
                 urgency=0.57,
-                corruption=0.03,
                 institutional_confidence=0.62,
                 beliefs={
                     "command_control": AdvisorBelief(
@@ -104,7 +101,6 @@ def initial_us_excomm_advisor_council() -> AdvisorCouncilState:
                 },
                 paranoia=0.56,
                 urgency=0.61,
-                corruption=0.18,
                 institutional_confidence=0.58,
                 beliefs={
                     "public_alarm": AdvisorBelief(
@@ -131,7 +127,6 @@ def initial_us_excomm_advisor_council() -> AdvisorCouncilState:
                 },
                 paranoia=0.44,
                 urgency=0.48,
-                corruption=0.04,
                 institutional_confidence=0.69,
                 beliefs={
                     "legitimacy": AdvisorBelief(
@@ -139,6 +134,37 @@ def initial_us_excomm_advisor_council() -> AdvisorCouncilState:
                         value=0.7,
                         summary="OAS and UN framing can make pressure look controlled rather than unilateral.",
                         confidence=0.63,
+                    )
+                },
+            ),
+            "personal": AdvisorState(
+                advisor_id="personal",
+                name="Chief of Staff",
+                portfolio="Presidential authority and hidden political pressure",
+                personality="Loyal, blunt, protective of the president's room for maneuver.",
+                institutional_orientation="Loyal to the player before any faction.",
+                hidden_metric_access=True,
+                loyal_to_player=True,
+                trust_player=0.68,
+                trust_channels={
+                    "backchannel": 0.66,
+                    "private_diplomatic": 0.62,
+                    "public": 0.7,
+                    "military": 0.48,
+                    "intel": 0.58,
+                },
+                paranoia=0.58,
+                urgency=0.64,
+                institutional_confidence=0.64,
+                beliefs={
+                    "room_control": AdvisorBelief(
+                        topic="room_control",
+                        value=0.62,
+                        summary=(
+                            "Strategic restraint only holds if the room still "
+                            "believes the president controls the pace."
+                        ),
+                        confidence=0.62,
                     )
                 },
             ),

@@ -110,6 +110,7 @@ export type PlanPreviewView = {
   is_committable: boolean;
   actions: {
     title: string;
+    intent_summary: string;
     action_id: string;
     capability_id: string | null;
     target_ids: string[];
@@ -118,18 +119,33 @@ export type PlanPreviewView = {
   warnings: string[];
   errors: string[];
   notes: string[];
+  known_pending_actions: string[];
+  resource_pressure: string[];
+  open_backchannel_constraints: string[];
+  recent_event_context: string[];
+  visible_flash_event_risks: string[];
+  known_consequences: string[];
+  compiled_intents: string[];
+  rejected_intents: string[];
+  unprocessed_intents: string[];
+  action_slots_used: number;
+  action_slots_available: number;
   rendered_text: string;
 } | null;
 
 export type TurnResultView = {
   turn_number: number;
   accepted_actions: string[];
+  resolved_actions: string[];
   rejected_actions: string[];
+  resource_blocked_actions: string[];
   scheduled_actions: string[];
+  critical_warnings: string[];
   batch_warnings: string[];
   flash_events: string[];
   media_headlines: string[];
   consequences: string[];
+  pressure_updates: string[];
   advisor_reactions: string[];
   npc_reactions: string[];
   new_problems: ProblemView[];
@@ -143,10 +159,13 @@ export type AdvisorDialogueView = {
   advisor_views: string[];
   risk_warnings: string[];
   suggested_moves: string[];
+  information_gaps: string[];
+  visible_context_limits: string[];
 } | null;
 
 export type BackchannelThreadView = {
   thread_id: string;
+  target_id: string;
   counterpart: string;
   status: string;
   expires_turn: number;
@@ -154,6 +173,14 @@ export type BackchannelThreadView = {
   trust_band: string;
   leak_risk_band: string;
   latest: string;
+};
+
+export type ChannelMessageView = {
+  message_id: string;
+  sender: string;
+  text: string;
+  turn: number;
+  is_player: boolean;
 };
 
 export type PendingEventChoiceView = {
@@ -267,6 +294,8 @@ export type ControlRoomView = {
   situation_summary: string;
   open_problems: ProblemView[];
   recent_results: string[];
+  latest_result: TurnResultView;
+  critical_warnings: string[];
   pressure: PressureView[];
   resources: ResourceView[];
   agenda: AgendaView;
@@ -301,6 +330,7 @@ export type AdvisorRoomView = {
   figures: AdvisorFigureView[];
   proposals: AdvisorProposalView[];
   council_messages: string[];
+  council_read: string[];
   agenda: AgendaView;
   agenda_conflicts: AgendaConflictView[];
   latest_dialogue: AdvisorDialogueView;
@@ -308,6 +338,7 @@ export type AdvisorRoomView = {
 
 export type ChannelThreadView = {
   thread_id: string;
+  target_id: string;
   counterpart: string;
   status: string;
   expires_turn: number;
@@ -315,6 +346,7 @@ export type ChannelThreadView = {
   trust_band: string;
   leak_risk_band: string;
   latest: string;
+  messages: ChannelMessageView[];
   unread: boolean;
 };
 
@@ -361,6 +393,7 @@ export type GameView = {
   asset_manifest: AssetManifestView;
   agenda: AgendaView;
   plan_preview: PlanPreviewView;
+  pending_event_choices: PendingEventChoiceView[];
   ending_offers: EndingOfferView[];
   saves: SaveSummaryView[];
   debug: DebugView;

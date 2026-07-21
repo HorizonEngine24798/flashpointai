@@ -5,7 +5,7 @@ from crisis_room.app.turn_orchestrator import TurnOrchestrator
 from crisis_room.engine.actions import ActionPackage
 from crisis_room.engine.batch_validation import build_batch_validation_report
 from crisis_room.llm.scripted_client import ScriptedLLMClient
-from crisis_room.scenario.schema import build_cuban_missile_crisis_1962_scenario
+from crisis_room.scenario.cuba import build_cuban_missile_crisis_1962_scenario
 from crisis_room.state.signals import SignalChannel
 
 
@@ -52,8 +52,7 @@ def test_batch_validation_reports_common_multi_action_conflicts() -> None:
                 capability_id="cuba_offer_non_invasion_pledge",
                 target_ids=["soviet_presidium"],
                 channel=SignalChannel.PRIVATE_DIPLOMATIC,
-                intent_summary="Offer a pledge only if pressure fails.",
-                fallback_condition="if the quarantine does not move Moscow",
+                intent_summary="Offer a non-invasion pledge.",
             ),
             ActionPackage(
                 package_id="pkg_soviet_probe_a",
@@ -85,7 +84,6 @@ def test_batch_validation_reports_common_multi_action_conflicts() -> None:
     player_codes = {warning.code for warning in player_warnings}
 
     assert {
-        "fallback_submitted_now",
         "missing_backchannel_thread",
         "public_covert_tension",
         "resource_contention",

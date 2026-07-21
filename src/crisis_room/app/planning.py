@@ -133,6 +133,15 @@ def render_player_plan_preview(
         lines.append("Compiled actions:")
         for index, package in enumerate(preview.compilation.action_packages, start=1):
             lines.append(f"{index}. {_action_line(package, resolver)}")
+        lines.extend(
+            [
+                "",
+                f"Action budget: {len(preview.compilation.action_packages)} / "
+                f"{preview.compilation.action_budget} slots used.",
+            ]
+        )
+        if len(preview.compilation.action_packages) > 1:
+            lines.append("Each compiled action consumes one formal action slot.")
 
     if preview.compilation.compiled_intents:
         lines.extend(["", "Compiled intents:"])
@@ -178,6 +187,18 @@ def render_player_plan_preview(
         lines.extend(f"- {item}" for item in preview.known_consequences)
     if preview.is_committable:
         lines.extend(["", "Type COMMIT to resolve this exact plan."])
+    else:
+        lines.extend(
+            [
+                "",
+                "Try next:",
+                "- Type ACTIONS to inspect legal action names.",
+                (
+                    "- Name the action and target directly, for example: "
+                    "ACTION open a private Kremlin channel to soviet_presidium."
+                ),
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -188,11 +209,7 @@ def _action_line(
     definition, errors = resolver.resolve_package(package)
     title = definition.title if definition is not None and not errors else package.mechanical_id
     targets = ", ".join(package.target_ids) if package.target_ids else "no direct target"
-    timing = ""
-    if package.requested_timing and package.requested_timing != "current_turn":
-        timing = f", timing {package.requested_timing}"
-    fallback = f", fallback if {package.fallback_condition}" if package.fallback_condition else ""
-    return f"{title} via {package.channel.value} to {targets}{timing}{fallback}"
+    return f"{title} via {package.channel.value} to {targets}"
 
 
 def _known_pending_actions(
@@ -264,6 +281,8 @@ def _open_backchannel_constraints(
         if player_entity_id not in thread.participant_entity_ids:
             continue
         if thread.status != BackchannelThreadStatus.OPEN:
+            continue
+        if thread.expires_turn < world_state.turn_number:
             continue
         counterparts = [
             world_state.actors[entity_id].name

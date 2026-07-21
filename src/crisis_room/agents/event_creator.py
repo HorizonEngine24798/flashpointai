@@ -8,6 +8,7 @@ from crisis_room.config.gameplay import (
     VISIBLE_CONTEXT_TIMELINE_LIMIT,
 )
 from crisis_room.llm.contracts import LLMClient
+from crisis_room.llm.prompts import EVENT_CREATOR_SYSTEM, EVENT_CREATOR_TASK
 from crisis_room.llm.task_contracts import EventCreatorResponse, PublicBrief
 from crisis_room.scenario.events import ScenarioEventDefinition
 from crisis_room.state.timelines import TimelineEntry, TimelineScope
@@ -72,25 +73,9 @@ class EventCreatorAgent:
         }
         request = build_task_request(
             label=f"event_creator.{self.entity_id}.media_event_turn",
-            system_prompt=(
-                "You are the media desk and event creator for a political-military "
-                "crisis. Every turn, write a public-facing headline brief from "
-                "visible information and, only if warranted, propose one major "
-                "historical, chaotic, institutional, local-initiative, or media "
-                "pressure event. Do not mutate clocks, timelines, or resources."
-            ),
+            system_prompt=EVENT_CREATOR_SYSTEM,
             visible_context=visible_context,
-            task_instruction=(
-                "Return an EventCreatorResponse. Always fill public_brief as headline "
-                "news using only public timeline, public metrics, actor public "
-                "profiles, scenario notes, and scenario_public_events. Keep omitted "
-                "private topics explicit when the media cannot know something. "
-                "Set event_candidate only when a major event is relevant this turn; "
-                "otherwise return null and use editorial_notes to explain why the "
-                "headline is enough. If you propose an event, include suggested_signals "
-                "for information that should enter the info channel. Use "
-                "deterministic_effect_hints only as non-authoritative hints."
-            ),
+            task_instruction=EVENT_CREATOR_TASK,
             response_schema_name="EventCreatorResponse",
             metadata={"agent": self.entity_id, "turn_number": world_state.turn_number},
             max_tokens=EVENT_CREATOR_MAX_TOKENS,
@@ -101,20 +86,16 @@ class EventCreatorAgent:
         summary = f"{response.public_brief.headline}: {response.public_brief.summary}"
         if candidate is not None:
             summary = f"{summary} Major event candidate: {candidate.title}: {candidate.summary}"
-        raw_outputs: list[dict[str, object]] = [
-            {"task": "event_creator_response", "response": response.model_dump(mode="json")},
-            {"task": "public_brief", "response": response.public_brief.model_dump(mode="json")},
-        ]
-        if candidate is not None:
-            raw_outputs.append(
-                {"task": "event_candidate", "response": candidate.model_dump(mode="json")}
-            )
         return AgentOutput(
             entity_id=self.entity_id,
             perception_summary=summary,
-            internal_debate=list(response.editorial_notes),
             public_timeline_delta=[public_entry],
-            raw_llm_outputs=raw_outputs,
+            raw_llm_outputs=[
+                {
+                    "task": "event_creator_response",
+                    "response": response.model_dump(mode="json"),
+                }
+            ],
         )
 
 
@@ -124,9 +105,7 @@ def _scenario_public_event_context(
     limit: int,
 ) -> list[dict[str, object]]:
     context: list[dict[str, object]] = []
-    for event in scenario_events[: max(limit, 0)]:
-        if not event.enabled:
-            continue
+    for event in [event for event in scenario_events if event.enabled][: max(limit, 0)]:
         context.append(
             {
                 "event_id": event.event_id,

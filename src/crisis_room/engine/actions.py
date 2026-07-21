@@ -61,8 +61,6 @@ class ActionDefinition(BaseModel):
     min_targets: int = Field(default=0, ge=0)
     max_targets: int | None = Field(default=None, ge=0)
     preconditions: list[str] = Field(default_factory=list)
-    direct_effects: dict[str, int | float | str | bool] = Field(default_factory=dict)
-    side_effects: list[str] = Field(default_factory=list)
     truth_metric_effects: dict[str, float] = Field(default_factory=dict)
     public_metric_effects: dict[str, float] = Field(default_factory=dict)
     clock_effects: dict[str, int | float] = Field(default_factory=dict)
@@ -103,8 +101,6 @@ class ScenarioCapability(BaseModel):
     min_targets: int = Field(default=0, ge=0)
     max_targets: int | None = Field(default=None, ge=0)
     preconditions: list[str] = Field(default_factory=list)
-    direct_effects: dict[str, int | float | str | bool] = Field(default_factory=dict)
-    side_effects: list[str] = Field(default_factory=list)
     truth_metric_effects: dict[str, float] = Field(default_factory=dict)
     public_metric_effects: dict[str, float] = Field(default_factory=dict)
     clock_effects: dict[str, int | float] = Field(default_factory=dict)
@@ -134,10 +130,7 @@ class ActionPackage(BaseModel):
     intent_summary: str
     public_rationale: str = ""
     private_rationale: str = ""
-    requested_timing: str = "current_turn"
     commitment_level: float = Field(default=0.5, ge=0.0, le=1.0)
-    risk_acceptance: float = Field(default=0.5, ge=0.0, le=1.0)
-    fallback_condition: str | None = None
     submitted_turn: int | None = Field(default=None, ge=0)
     metadata: dict[str, str | int | float | bool] = Field(default_factory=dict)
     parameters: dict[str, ActionParameterValue] = Field(default_factory=dict)
@@ -248,11 +241,6 @@ def resolved_action_definition(
             "min_targets": capability.min_targets,
             "max_targets": capability.max_targets,
             "preconditions": [*generic.preconditions, *capability.preconditions],
-            "direct_effects": _merge_dicts(
-                generic.direct_effects,
-                capability.direct_effects,
-            ),
-            "side_effects": [*generic.side_effects, *capability.side_effects],
             "truth_metric_effects": _merge_dicts(
                 generic.truth_metric_effects,
                 capability.truth_metric_effects,

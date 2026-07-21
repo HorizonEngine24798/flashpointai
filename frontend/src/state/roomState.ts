@@ -1,4 +1,6 @@
-export type RoomId = "control" | "advisors" | "media";
+export const rooms = ["control", "advisors", "media"] as const;
+
+export type RoomId = (typeof rooms)[number];
 
 export type OverlayId = "debug" | "settings" | null;
 

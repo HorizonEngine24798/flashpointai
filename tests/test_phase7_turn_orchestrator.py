@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from crisis_room.app.turn_orchestrator import TurnOrchestrator
 from crisis_room.llm.contracts import FakeLLMClient
-from crisis_room.scenario.schema import build_cuban_missile_crisis_1962_scenario
+from crisis_room.scenario.cuba import build_cuban_missile_crisis_1962_scenario
 from crisis_room.state.signals import (
     PayloadType,
     Signal,
@@ -63,119 +63,120 @@ def test_turn_orchestrator_runs_full_fake_agent_turn_without_live_llm() -> None:
                 "public_rationale": "Offensive missile bases in Cuba must be dismantled.",
                 "notes": ["Compiled into the public demand catalog action."],
             },
-            "faction.soviet_presidium.perception_update": {
-                "situation_summary": "Moscow sees public pressure building.",
-                "belief_updates": [
-                    {
-                        "topic": "excomm intent",
-                        "summary": "EXCOMM may still be testing for a reciprocal pause",
-                        "confidence": 0.6,
-                    }
-                ],
+            "faction.soviet_presidium.turn": {
+                "perception_update": {
+                    "situation_summary": "Moscow sees public pressure building.",
+                    "belief_updates": [
+                        {
+                            "topic": "excomm intent",
+                            "summary": "EXCOMM may still be testing for a reciprocal pause",
+                            "confidence": 0.6,
+                        }
+                    ],
+                },
+                "internal_debate": {
+                    "positions": [
+                        {
+                            "narrative_id": "hold_line",
+                            "argument": "Do not concede under pressure.",
+                            "preferred_action_id": "public_statement",
+                            "preferred_capability_id": "soviet_defiance_statement",
+                            "perceived_risk": 0.7,
+                        },
+                        {
+                            "narrative_id": "settlement",
+                            "argument": "Probe a private off-ramp before rhetoric hardens.",
+                            "preferred_action_id": "private_diplomacy",
+                            "preferred_capability_id": "soviet_compromise_probe",
+                            "target_entity_ids": ["us_excomm"],
+                            "perceived_risk": 0.35,
+                        },
+                    ],
+                    "synthesis": "Preserve posture while privately testing the exit.",
+                    "dominant_narrative_id": "settlement",
+                },
+                "decision": {
+                    "action_id": "private_diplomacy",
+                    "capability_id": "soviet_compromise_probe",
+                    "target_ids": ["us_excomm"],
+                    "channel": "backchannel",
+                    "intent_summary": "Privately ask whether reciprocal restraint is still possible.",
+                    "private_rationale": "A deniable probe avoids public capitulation.",
+                    "commitment_level": 0.45,
+                },
             },
-            "faction.soviet_presidium.internal_debate": {
-                "positions": [
-                    {
-                        "narrative_id": "hold_line",
-                        "argument": "Do not concede under pressure.",
-                        "preferred_action_id": "public_statement",
-                        "preferred_capability_id": "soviet_defiance_statement",
-                        "perceived_risk": 0.7,
-                    },
-                    {
-                        "narrative_id": "settlement",
-                        "argument": "Probe a private off-ramp before rhetoric hardens.",
-                        "preferred_action_id": "private_diplomacy",
-                        "preferred_capability_id": "soviet_compromise_probe",
-                        "target_entity_ids": ["us_excomm"],
-                        "perceived_risk": 0.35,
-                    },
-                ],
-                "synthesis": "Preserve posture while privately testing the exit.",
-                "dominant_narrative_id": "settlement",
+            "faction.cuba.turn": {
+                "perception_update": {
+                    "situation_summary": "Havana reads U.S. pressure as possible invasion preparation.",
+                    "belief_updates": [
+                        {
+                            "topic": "invasion threat",
+                            "summary": "U.S. public pressure may precede military action.",
+                            "confidence": 0.7,
+                        }
+                    ],
+                },
+                "internal_debate": {
+                    "positions": [
+                        {
+                            "narrative_id": "defiant",
+                            "argument": "Raise air defense readiness so Cuba cannot be ignored.",
+                            "preferred_action_id": "military_posture",
+                            "preferred_capability_id": "cuba_air_defense_alert",
+                            "target_entity_ids": ["us_excomm"],
+                            "perceived_risk": 0.65,
+                        }
+                    ],
+                    "synthesis": "Visible readiness is risky but politically necessary.",
+                    "dominant_narrative_id": "defiant",
+                },
+                "decision": {
+                    "action_id": "military_posture",
+                    "capability_id": "cuba_air_defense_alert",
+                    "target_ids": ["us_excomm"],
+                    "channel": "military",
+                    "intent_summary": "Raise Cuban air defense alert against feared invasion.",
+                    "private_rationale": "Deter attack and force superpowers to account for Cuba.",
+                    "commitment_level": 0.7,
+                },
             },
-            "faction.soviet_presidium.faction_decision": {
-                "action_id": "private_diplomacy",
-                "capability_id": "soviet_compromise_probe",
-                "target_ids": ["us_excomm"],
-                "channel": "backchannel",
-                "intent_summary": "Privately ask whether reciprocal restraint is still possible.",
-                "private_rationale": "A deniable probe avoids public capitulation.",
-                "commitment_level": 0.45,
-                "risk_acceptance": 0.3,
-            },
-            "faction.cuba.perception_update": {
-                "situation_summary": "Havana reads U.S. pressure as possible invasion preparation.",
-                "belief_updates": [
-                    {
-                        "topic": "invasion threat",
-                        "summary": "U.S. public pressure may precede military action.",
-                        "confidence": 0.7,
-                    }
-                ],
-            },
-            "faction.cuba.internal_debate": {
-                "positions": [
-                    {
-                        "narrative_id": "defiant",
-                        "argument": "Raise air defense readiness so Cuba cannot be ignored.",
-                        "preferred_action_id": "military_posture",
-                        "preferred_capability_id": "cuba_air_defense_alert",
-                        "target_entity_ids": ["us_excomm"],
-                        "perceived_risk": 0.65,
-                    }
-                ],
-                "synthesis": "Visible readiness is risky but politically necessary.",
-                "dominant_narrative_id": "defiant",
-            },
-            "faction.cuba.faction_decision": {
-                "action_id": "military_posture",
-                "capability_id": "cuba_air_defense_alert",
-                "target_ids": ["us_excomm"],
-                "channel": "military",
-                "intent_summary": "Raise Cuban air defense alert against feared invasion.",
-                "private_rationale": "Deter attack and force superpowers to account for Cuba.",
-                "commitment_level": 0.7,
-                "risk_acceptance": 0.62,
-            },
-            "faction.nato_allies.perception_update": {
-                "situation_summary": "Allies support Washington but worry about European spillover.",
-                "belief_updates": [
-                    {
-                        "topic": "alliance consultation",
-                        "summary": "EXCOMM needs allied backing for a public line.",
-                        "confidence": 0.68,
-                    }
-                ],
-            },
-            "faction.nato_allies.internal_debate": {
-                "positions": [
-                    {
-                        "narrative_id": "solidarity",
-                        "argument": "Support Washington while demanding disciplined consultation.",
-                        "preferred_action_id": "private_diplomacy",
-                        "preferred_capability_id": "nato_reassurance_pressure",
-                        "target_entity_ids": ["us_excomm"],
-                        "perceived_risk": 0.42,
-                    }
-                ],
-                "synthesis": "Private reassurance can strengthen public solidarity.",
-                "dominant_narrative_id": "solidarity",
-            },
-            "faction.nato_allies.faction_decision": {
-                "action_id": "private_diplomacy",
-                "capability_id": "nato_reassurance_pressure",
-                "target_ids": ["us_excomm"],
-                "channel": "private_diplomatic",
-                "intent_summary": "Privately ask Washington for consultation before the next public move.",
-                "private_rationale": "Alliance backing depends on not being blindsided.",
-                "commitment_level": 0.45,
-                "risk_acceptance": 0.25,
+            "faction.nato_allies.turn": {
+                "perception_update": {
+                    "situation_summary": "Allies support Washington but worry about European spillover.",
+                    "belief_updates": [
+                        {
+                            "topic": "alliance consultation",
+                            "summary": "EXCOMM needs allied backing for a public line.",
+                            "confidence": 0.68,
+                        }
+                    ],
+                },
+                "internal_debate": {
+                    "positions": [
+                        {
+                            "narrative_id": "solidarity",
+                            "argument": "Support Washington while demanding disciplined consultation.",
+                            "preferred_action_id": "private_diplomacy",
+                            "preferred_capability_id": "nato_reassurance_pressure",
+                            "target_entity_ids": ["us_excomm"],
+                            "perceived_risk": 0.42,
+                        }
+                    ],
+                    "synthesis": "Private reassurance can strengthen public solidarity.",
+                    "dominant_narrative_id": "solidarity",
+                },
+                "decision": {
+                    "action_id": "private_diplomacy",
+                    "capability_id": "nato_reassurance_pressure",
+                    "target_ids": ["us_excomm"],
+                    "channel": "private_diplomatic",
+                    "intent_summary": "Privately ask Washington for consultation before the next public move.",
+                    "private_rationale": "Alliance backing depends on not being blindsided.",
+                    "commitment_level": 0.45,
+                },
             },
             "international.international.pressure": {
                 "situation_summary": "External actors are alarmed by the visible standoff.",
-                "legitimacy_concerns": ["Public alarm is rising."],
-                "requested_restraints": ["Avoid irreversible deployments."],
                 "pressure_signals": [
                     {
                         "channel": "media",
@@ -186,23 +187,30 @@ def test_turn_orchestrator_runs_full_fake_agent_turn_without_live_llm() -> None:
                     }
                 ],
             },
-            "event_creator.event_creator.candidate": {
-                "candidate_id": "recon_confusion_1",
-                "kind": "chaos",
-                "title": "Reconnaissance Confusion",
-                "summary": "A local unit misreads routine movement as a warning sign.",
-                "plausibility": 0.65,
-                "escalation_pressure": 0.7,
-                "suggested_signals": [
-                    {
-                        "target_entity_ids": ["us_excomm"],
-                        "channel": "intel",
-                        "payload_type": "intel_report",
-                        "content": "Intercepts suggest confused local radio traffic.",
-                        "visibility": "secret",
-                        "reliability": 0.55,
-                    }
-                ],
+            "event_creator.event_creator.media_event_turn": {
+                "public_brief": {
+                    "headline": "Reconnaissance Confusion",
+                    "summary": "A local unit misreads routine movement as a warning sign.",
+                    "public_risk_read": "Visible standoff remains tense.",
+                },
+                "event_candidate": {
+                    "candidate_id": "recon_confusion_1",
+                    "kind": "chaos",
+                    "title": "Reconnaissance Confusion",
+                    "summary": "A local unit misreads routine movement as a warning sign.",
+                    "plausibility": 0.65,
+                    "escalation_pressure": 0.7,
+                    "suggested_signals": [
+                        {
+                            "target_entity_ids": ["us_excomm"],
+                            "channel": "intel",
+                            "payload_type": "intel_report",
+                            "content": "Intercepts suggest confused local radio traffic.",
+                            "visibility": "secret",
+                            "reliability": 0.55,
+                        }
+                    ],
+                },
             },
         }
     )

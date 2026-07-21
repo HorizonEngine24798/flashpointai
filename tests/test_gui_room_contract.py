@@ -18,7 +18,19 @@ def test_game_view_exposes_room_contract(tmp_path: Path) -> None:
     )
 
     view = session.get_view()
+    payload = view.model_dump(mode="json")
 
+    assert {
+        "scenario",
+        "turn",
+        "scene",
+        "control_room",
+        "advisor_room",
+        "media_room",
+        "agenda",
+        "settings",
+        "asset_manifest",
+    }.issubset(payload)
     assert 0 <= view.scene.tension_level <= 4
     assert view.scene.room_asset_key.startswith("rooms/control_tension_")
     assert view.ticker
@@ -30,6 +42,9 @@ def test_game_view_exposes_room_contract(tmp_path: Path) -> None:
     assert view.control_room.situation_summary
     assert view.control_room.open_problems
     assert view.advisor_room.figures
+    assert sum(figure.side == "left" for figure in view.advisor_room.figures) == sum(
+        figure.side == "right" for figure in view.advisor_room.figures
+    )
     assert all(figure.asset_key.startswith("advisors/") for figure in view.advisor_room.figures)
     assert all("faceless" not in key for key in view.asset_manifest.advisor_asset_keys)
     assert {
@@ -56,6 +71,38 @@ def test_game_view_exposes_room_contract(tmp_path: Path) -> None:
         "Reconnaissance Confusion" in line
         for line in view.control_room.recent_results
     )
+
+
+def test_card_agenda_and_freeform_plan_are_mutually_exclusive(tmp_path: Path) -> None:
+    session = GameSession(
+        llm_client=ScriptedLLMClient(),
+        output_dir=tmp_path / "debug",
+        save_dir=tmp_path / "saves",
+    )
+    card = next(
+        card
+        for proposal in session.get_view().advisor_room.proposals
+        for card in proposal.cards
+        if card.legal_now
+    )
+
+    selected = session.select_action_card(card.card_id)
+    assert selected.agenda.items
+    assert selected.plan_preview is None
+
+    planned = session.preview_plan(
+        "open a private Kremlin backchannel for reciprocal restraint"
+    )
+    assert planned.plan_preview is not None
+    assert not planned.agenda.items
+
+    selected_again = session.select_action_card(card.card_id)
+    assert selected_again.plan_preview is None
+    assert selected_again.agenda.items
+
+    session.preview_plan("open a private Kremlin backchannel for reciprocal restraint")
+    cancelled = session.cancel_plan()
+    assert cancelled.plan_preview is None
 
 
 def test_scenario_and_new_session_endpoints_use_room_contract(tmp_path: Path) -> None:

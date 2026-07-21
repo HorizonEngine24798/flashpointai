@@ -238,5 +238,200 @@ def cuban_scenario_events() -> list[ScenarioEventDefinition]:
                 "Unconfirmed reports suggest private U.S.-Soviet contact."
             ),
         ),
+        ScenarioEventDefinition(
+            event_id="missile_sites_near_operational",
+            title="Missile Sites Near Operational",
+            summary=(
+                "Intelligence estimates now warn that some missile sites may soon "
+                "be ready enough to change EXCOMM's room for maneuver."
+            ),
+            kind="historical_pressure",
+            trigger=ScenarioEventTrigger(
+                truth_metric_minimums={"missile_operational_progress": 0.75},
+                probability=1.0,
+            ),
+            effects=ScenarioEventEffect(
+                truth_metric_effects={"hawk_pressure": 0.05, "verification_gap": 0.03},
+                public_metric_effects={"public_alarm": 0.04},
+                clock_effects={"invasion_momentum": 0.06, "nuclear_escalation": 0.03},
+            ),
+            signals=[
+                ScenarioEventSignalDefinition(
+                    target_entity_ids=["us_excomm"],
+                    channel=SignalChannel.INTEL,
+                    payload_type=PayloadType.INTEL_REPORT,
+                    content=(
+                        "Site readiness estimates are compressing; verification "
+                        "is no longer a background task."
+                    ),
+                    visibility=SignalVisibility.SECRET,
+                    reliability=0.72,
+                    urgency=0.78,
+                )
+            ],
+            visible_to=["us_excomm"],
+            related_entity_ids=["cuba", "soviet_presidium"],
+            problem_title="Missile readiness window is closing",
+            problem_summary=(
+                "The room may have less time than public posture suggests; "
+                "verification and off-ramp pressure now compete directly."
+            ),
+            urgency="high",
+        ),
+        ScenarioEventDefinition(
+            event_id="local_commander_acts",
+            title="Local Commander Acts",
+            summary=(
+                "A local commander takes an aggressive readiness step before "
+                "national leaders can fully coordinate the meaning of the order."
+            ),
+            kind="local_initiative",
+            trigger=ScenarioEventTrigger(
+                hidden_clock_minimums={"command_and_control_risk": 0.65},
+                probability=1.0,
+            ),
+            effects=ScenarioEventEffect(
+                truth_metric_effects={"escalation_pressure": 0.06},
+                public_metric_effects={"public_alarm": 0.04},
+                clock_effects={"nuclear_escalation": 0.07},
+            ),
+            signals=[
+                ScenarioEventSignalDefinition(
+                    target_entity_ids=["us_excomm"],
+                    channel=SignalChannel.MILITARY,
+                    payload_type=PayloadType.MILITARY_MOVEMENT_OBSERVATION,
+                    content="Operational reporting shows a local unit moving ahead of political guidance.",
+                    visibility=SignalVisibility.COVERT,
+                    reliability=0.64,
+                    urgency=0.84,
+                )
+            ],
+            visible_to=["us_excomm"],
+            related_entity_ids=["cuba", "soviet_presidium"],
+            problem_title="Local command initiative is breaking containment",
+            problem_summary=(
+                "Command risk is now tangible: national leaders may be reacting "
+                "to local initiative rather than controlling it."
+            ),
+            urgency="critical",
+        ),
+        ScenarioEventDefinition(
+            event_id="backchannel_collapses",
+            title="Backchannel Collapses",
+            summary=(
+                "Private-channel trust erodes far enough that deniable messages "
+                "are now more likely to confuse or leak than settle the crisis."
+            ),
+            kind="institutional_friction",
+            trigger=ScenarioEventTrigger(
+                hidden_clock_maximums={"backchannel_viability": 0.3},
+                probability=1.0,
+            ),
+            effects=ScenarioEventEffect(
+                truth_metric_effects={"diplomatic_offramp": -0.08},
+                public_metric_effects={"press_alarm": 0.03},
+                clock_effects={"nuclear_escalation": 0.03},
+            ),
+            signals=[
+                ScenarioEventSignalDefinition(
+                    target_entity_ids=["us_excomm"],
+                    channel=SignalChannel.PRIVATE_DIPLOMATIC,
+                    payload_type=PayloadType.PRIVATE_DIPLOMATIC_MESSAGE,
+                    content="Private envoys report that deniable messages are losing credibility.",
+                    visibility=SignalVisibility.PRIVATE,
+                    reliability=0.78,
+                    urgency=0.72,
+                )
+            ],
+            visible_to=["us_excomm"],
+            related_entity_ids=["soviet_presidium"],
+            problem_title="Backchannel is no longer reliable",
+            problem_summary=(
+                "Private diplomacy may still matter, but the channel now carries "
+                "more leak and misread risk than leverage."
+            ),
+            urgency="high",
+        ),
+        ScenarioEventDefinition(
+            event_id="congressional_revolt",
+            title="Congressional Revolt",
+            summary=(
+                "Lawmakers demand clarity as private reports suggest the White "
+                "House may be trading too much restraint for too little verification."
+            ),
+            kind="media_leak",
+            trigger=ScenarioEventTrigger(
+                truth_metric_maximums={"domestic_trust": 0.25},
+                probability=1.0,
+            ),
+            effects=ScenarioEventEffect(
+                truth_metric_effects={"domestic_trust": -0.08, "hawk_pressure": 0.06},
+                public_metric_effects={"press_alarm": 0.05},
+            ),
+            signals=[
+                ScenarioEventSignalDefinition(
+                    target_entity_ids=["us_excomm"],
+                    channel=SignalChannel.MEDIA,
+                    payload_type=PayloadType.MEDIA_REPORT,
+                    content="Congressional voices demand a harder public line on Cuba.",
+                    visibility=SignalVisibility.PUBLIC,
+                    reliability=0.82,
+                    urgency=0.7,
+                    classification="public",
+                )
+            ],
+            visible_to=["us_excomm"],
+            related_entity_ids=["us_excomm"],
+            problem_title="Domestic coalition is splitting",
+            problem_summary=(
+                "Domestic pressure has become an active crisis constraint rather "
+                "than background noise."
+            ),
+            urgency="high",
+            public_timeline_title="Congress Splits Over Cuba Line",
+            public_timeline_summary=(
+                "Lawmakers demand clarity as reports suggest private concessions "
+                "may be under discussion."
+            ),
+        ),
+        ScenarioEventDefinition(
+            event_id="security_chiefs_demand_hard_line",
+            title="Security Chiefs Demand Hard Line",
+            summary=(
+                "Security leaders begin treating compromise as a loss of control "
+                "unless it is paired with visible verification or force."
+            ),
+            kind="institutional_friction",
+            trigger=ScenarioEventTrigger(
+                truth_metric_minimums={
+                    "hawk_pressure": 0.75,
+                    "perceived_weakness": 0.65,
+                },
+                public_metric_minimums={"public_confidence": 0.55},
+                probability=1.0,
+            ),
+            effects=ScenarioEventEffect(
+                truth_metric_effects={"institutional_loyalty": -0.08},
+                clock_effects={"invasion_momentum": 0.08},
+            ),
+            signals=[
+                ScenarioEventSignalDefinition(
+                    target_entity_ids=["us_excomm"],
+                    channel=SignalChannel.MILITARY,
+                    payload_type=PayloadType.GAMEMASTER_RULING,
+                    content="Senior security voices are aligning around a harder line.",
+                    visibility=SignalVisibility.PRIVATE,
+                    reliability=0.86,
+                    urgency=0.78,
+                )
+            ],
+            visible_to=["us_excomm"],
+            related_entity_ids=["us_excomm"],
+            problem_title="Security chiefs are hardening",
+            problem_summary=(
+                "Hawk pressure and perceived weakness now threaten presidential "
+                "control inside the room."
+            ),
+            urgency="high",
+        ),
     ]
-

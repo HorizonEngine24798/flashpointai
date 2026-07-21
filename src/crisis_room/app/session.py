@@ -33,7 +33,17 @@ from crisis_room.app.presentation import (
     build_turn_briefing,
     render_aftermath_report,
 )
-from crisis_room.app.turn_orchestrator import TurnOrchestrator
+from crisis_room.app.runtime_helpers import (
+    format_advisor_retry_error,
+    format_runtime_error,
+    llm_call_count,
+    llm_call_records,
+)
+from crisis_room.app.turn_orchestrator import (
+    RecoverableAdvisorDialogueError,
+    RecoverablePlayerActionError,
+    TurnOrchestrator,
+)
 from crisis_room.config.gameplay import HARD_ACTION_BUDGET, NORMAL_ACTION_BUDGET
 from crisis_room.config.settings import load_settings
 from crisis_room.engine.actions import (
@@ -47,8 +57,8 @@ from crisis_room.engine.action_matching import (
     default_targets,
 )
 from crisis_room.engine.adjudication import DeterministicEngineV2
-from crisis_room.llm.contracts import LLMCallRecord, LLMClient
-from crisis_room.llm.diagnostics import LlamaCppError
+from crisis_room.llm.contracts import LLMClient
+from crisis_room.llm.diagnostics import LlamaCppJSONError
 from crisis_room.llm.llama_cpp_client import LlamaCppServerClient
 from crisis_room.llm.task_contracts import AdvisorCouncilResponse
 from crisis_room.scenario.endings import accept_ending_offer, reject_ending_offer
@@ -116,6 +126,8 @@ class GameSession:
             capabilities=self.scenario.capabilities,
             scenario_events=self.scenario.scenario_events,
             scenario_endings=self.scenario.scenario_endings,
+            pressure_rules=self.scenario.pressure_rules,
+            hidden_obligations=self.scenario.hidden_obligations,
             event_settings=self.scenario.event_settings,
             llm_client=self.llm_client,
             action_budget=action_budget,
@@ -162,23 +174,26 @@ class GameSession:
         question = question.strip()
         if not question:
             raise ValueError("advisor question is empty")
-        call_start = _llm_call_count(self.llm_client)
+        call_start = llm_call_count(self.llm_client)
         try:
             response = self.dialogue_engine.respond_to_player(
                 self.world,
                 player_entity_id=self.player_id,
                 player_message=question,
                 llm_client=self.llm_client,
+                json_retries=1,
             )
+        except LlamaCppJSONError as exc:
+            raise ValueError(format_advisor_retry_error(exc)) from exc
         except Exception as exc:
-            raise RuntimeError(_format_runtime_error("Advisor dialogue", exc)) from exc
+            raise RuntimeError(format_runtime_error("Advisor dialogue", exc)) from exc
         self.latest_advisor_question = question
         self.latest_advisor_response = response
         self.recorder.append_dialogue(
             turn=self.world.turn_number,
             player_message=question,
             response=response,
-            llm_calls=_llm_call_records(self.llm_client, start_index=call_start),
+            llm_calls=llm_call_records(self.llm_client, start_index=call_start),
         )
         self.recorder.save()
         return self.get_view()
@@ -187,7 +202,7 @@ class GameSession:
         text = text.strip()
         if not text:
             raise ValueError("plan text is empty")
-        call_start = _llm_call_count(self.llm_client)
+        call_start = llm_call_count(self.llm_client)
         try:
             preview = build_player_plan_preview(
                 self.world,
@@ -199,12 +214,13 @@ class GameSession:
                 scenario_events=self.scenario.scenario_events,
             )
         except Exception as exc:
-            raise RuntimeError(_format_runtime_error("Plan preview", exc)) from exc
+            raise RuntimeError(format_runtime_error("Plan preview", exc)) from exc
         rendered = render_player_plan_preview(
             preview,
             action_catalog=self.scenario.action_catalog,
             capabilities=self.scenario.capabilities,
         )
+        self.agenda_items.clear()
         self.plan_preview = preview
         self.plan_preview_rendered = rendered
         self.recorder.append_plan_preview(
@@ -212,9 +228,14 @@ class GameSession:
             player_intent=text,
             preview=preview,
             rendered_text=rendered,
-            llm_calls=_llm_call_records(self.llm_client, start_index=call_start),
+            llm_calls=llm_call_records(self.llm_client, start_index=call_start),
         )
         self.recorder.save()
+        return self.get_view()
+
+    def cancel_plan(self) -> GameView:
+        self.plan_preview = None
+        self.plan_preview_rendered = ""
         return self.get_view()
 
     def commit_plan(self) -> GameView:
@@ -254,6 +275,8 @@ class GameSession:
         if not validation.is_valid:
             raise ValueError("; ".join(validation.errors) or "action is not legal now")
         title, category, source_title = self.card_metadata(card_id, package)
+        self.plan_preview = None
+        self.plan_preview_rendered = ""
         self.agenda_items.append(
             AgendaSelection(
                 agenda_item_id=str(uuid4()),
@@ -317,6 +340,7 @@ class GameSession:
             player_intent="hold no action this turn",
             player_message="",
             precompiled_player_compilation=compilation,
+            allow_empty_player_action=True,
         )
         return self.get_view()
 
@@ -330,7 +354,7 @@ class GameSession:
             player_entity_id=self.player_id,
             target_query=target_query,
         )
-        call_start = _llm_call_count(self.llm_client)
+        call_start = llm_call_count(self.llm_client)
         if target_id is not None:
             preparation = prepare_backchannel_message(
                 self.world,
@@ -345,7 +369,7 @@ class GameSession:
                 self.recorder.save()
                 raise ValueError("; ".join(preparation.errors))
             if preparation.formal:
-                preparation_calls = _llm_call_records(
+                preparation_calls = llm_call_records(
                     self.llm_client,
                     start_index=call_start,
                 )
@@ -378,7 +402,7 @@ class GameSession:
             llm_client=self.llm_client,
             info_channel=self.orchestrator.info_channel,
         )
-        llm_calls = _llm_call_records(self.llm_client, start_index=call_start)
+        llm_calls = llm_call_records(self.llm_client, start_index=call_start)
         if llm_calls:
             self.recorder.append_llm_task(
                 turn=self.world.turn_number,
@@ -394,7 +418,7 @@ class GameSession:
             raise ValueError("; ".join(result.errors))
         rendered = render_backchannel_direct_message_result(result)
         self.world = result.world_state
-        self._clear_turn_buffers()
+        self.latest_aftermath_report = None
         self.recorder.update_world_state(self.world, rendered_log_entry=rendered)
         self.latest_result_rendered = rendered
         self.latest_debug_text = rendered
@@ -552,6 +576,7 @@ class GameSession:
         player_intent: str,
         player_message: str,
         precompiled_player_compilation: GamemasterCompilation | None = None,
+        allow_empty_player_action: bool = False,
     ) -> None:
         try:
             result = self.orchestrator.run_turn(
@@ -561,9 +586,12 @@ class GameSession:
                 player_message=player_message,
                 scenario_notes=self.scenario.metadata.designer_notes,
                 precompiled_player_compilation=precompiled_player_compilation,
+                allow_empty_player_action=allow_empty_player_action,
             )
+        except (RecoverableAdvisorDialogueError, RecoverablePlayerActionError):
+            raise
         except Exception as exc:
-            raise RuntimeError(_format_runtime_error("Turn", exc)) from exc
+            raise RuntimeError(format_runtime_error("Turn", exc)) from exc
         self.world = result.world_state
         self.latest_aftermath_report = result.aftermath_report
         self.latest_result_rendered = render_aftermath_report(result.aftermath_report)
@@ -654,40 +682,6 @@ class GameSession:
 
 def _build_live_llm_client() -> LlamaCppServerClient:
     return LlamaCppServerClient(load_settings().llama_cpp)
-
-
-def _format_runtime_error(context: str, exc: Exception) -> str:
-    if not isinstance(exc, LlamaCppError):
-        return f"{context} failed: {type(exc).__name__}: {exc}"
-    lines = [
-        f"{context} failed.",
-        f"Live LLM error: {type(exc).__name__}",
-    ]
-    details = str(exc).strip()
-    if details:
-        lines.append("Details:")
-        lines.extend(f"  {part.strip()}" for part in details.split("; ") if part.strip())
-    return "\n".join(lines)
-
-
-def _llm_call_count(llm_client: LLMClient) -> int:
-    calls = getattr(llm_client, "calls", [])
-    return len(calls) if isinstance(calls, list) else 0
-
-
-def _llm_call_records(
-    llm_client: LLMClient,
-    *,
-    start_index: int,
-) -> list[LLMCallRecord]:
-    calls = getattr(llm_client, "calls", [])
-    if not isinstance(calls, list):
-        return []
-    return [
-        call.model_copy(deep=True)
-        for call in calls[start_index:]
-        if isinstance(call, LLMCallRecord)
-    ]
 
 
 def _source_title_for_definition(

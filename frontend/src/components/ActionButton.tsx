@@ -1,4 +1,3 @@
-import { AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
 import type { CSSProperties } from "react";
 import { roomAssets } from "../assets";
 
@@ -18,7 +17,6 @@ export function ActionButton({
   onAction
 }: ActionButtonProps) {
   const isBusy = Boolean(busy);
-  const Icon = isBusy ? Loader2 : disabled ? AlertTriangle : CheckCircle2;
 
   return (
     <div className="action-button-wrap">
@@ -36,7 +34,6 @@ export function ActionButton({
           } as CSSProperties
         }
       >
-        <Icon className={isBusy ? "spin" : ""} size={22} aria-hidden="true" />
         <span>{isBusy ? busy : label}</span>
       </button>
       {disabled && !isBusy && blockedReason ? (

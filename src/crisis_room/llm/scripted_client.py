@@ -8,22 +8,13 @@ from pydantic import BaseModel
 from crisis_room.config.gameplay import SCRIPTED_SOURCE_SPAN_LIMIT
 from crisis_room.llm.contracts import LLMCallRecord, LLMClient, LLMRequest, ResponseModelT
 from crisis_room.llm.task_contracts import (
-    AARSummary,
     AdvisorCouncilResponse,
-    AdvisorResponse,
-    BackchannelAvailabilityCheck,
     BackchannelCounterpartResponse,
     BackchannelStateChange,
-    EventCandidate,
     EventCreatorResponse,
-    FactionDecision,
     FactionTurnResponse,
-    IntentCompilation,
-    InternalDebate,
     InternationalPressure,
     MultiIntentCompilation,
-    PerceptionUpdate,
-    PublicBrief,
     SignalDistortionResponse,
 )
 
@@ -37,6 +28,7 @@ SCRIPTED_CAPABILITY_ACTIONS = {
     "cuba_raise_defcon_readiness": "military_posture",
     "cuba_offer_non_invasion_pledge": "private_diplomacy",
     "cuba_secret_jupiter_trade": "private_diplomacy",
+    "cuba_unorthodox_gambit": "information_operation",
     "cuba_prepare_air_strike": "military_posture",
     "soviet_compromise_probe": "private_diplomacy",
     "soviet_defiance_statement": "public_statement",
@@ -57,7 +49,7 @@ class ScriptedLLMClient(LLMClient):
         response_model: type[ResponseModelT],
     ) -> ResponseModelT:
         context = _extract_visible_context(request)
-        raw = _scripted_response(request, response_model, context)
+        raw = _scripted_response(response_model, context)
         record = LLMCallRecord(request=request, raw_response=raw)
         try:
             response = response_model.model_validate(raw)
@@ -71,42 +63,25 @@ class ScriptedLLMClient(LLMClient):
 
 
 def _scripted_response(
-    request: LLMRequest,
     response_model: type[BaseModel],
     context: dict[str, Any],
 ) -> dict[str, Any]:
-    if response_model in {AdvisorCouncilResponse, AdvisorResponse}:
+    if response_model is AdvisorCouncilResponse:
         return _advisor_response(context)
-    if response_model is BackchannelAvailabilityCheck:
-        return _backchannel_availability_check(context)
     if response_model is BackchannelCounterpartResponse:
         return _backchannel_counterpart_response(context)
     if response_model is BackchannelStateChange:
         return _backchannel_state_change(context)
-    if response_model is IntentCompilation:
-        return _intent_compilation(context)
     if response_model is MultiIntentCompilation:
         return _multi_intent_compilation(context)
-    if response_model is PerceptionUpdate:
-        return _perception_update(context)
-    if response_model is InternalDebate:
-        return _internal_debate(context)
-    if response_model is FactionDecision:
-        return _faction_decision(context)
     if response_model is FactionTurnResponse:
         return _faction_turn_response(context)
     if response_model is InternationalPressure:
         return _international_pressure(context)
-    if response_model is EventCandidate:
-        return _event_candidate(context)
     if response_model is EventCreatorResponse:
         return _event_creator_response(context)
-    if response_model is PublicBrief:
-        return _public_brief(context)
     if response_model is SignalDistortionResponse:
         return _signal_distortion_response(context)
-    if response_model is AARSummary:
-        return _aar_summary(context)
     return {}
 
 
@@ -273,90 +248,42 @@ def _backchannel_counterpart_response(context: dict[str, Any]) -> dict[str, Any]
     lowered = message.lower()
     if any(token in lowered for token in ["ultimatum", "threat", "strike", "bomb", "invasion"]):
         return {
-            "accepted": True,
             "response_text": (
                 "Threats in this channel will harden public positions. If Washington "
                 "wants a settlement, send concrete reciprocal terms."
             ),
-            "stance": "wary",
             "trust_delta": -0.06,
             "leak_risk_delta": 0.03,
             "relationship_delta": -0.04,
-            "notes": ["Threatening language narrows the off-ramp."],
         }
     if any(token in lowered for token in ["jupiter", "turkey", "trade", "swap"]):
         return {
-            "accepted": True,
             "response_text": (
                 "Any Turkey/Jupiter understanding must remain deniable and separate "
                 "from the public withdrawal formula."
             ),
-            "stance": "interested",
             "trust_delta": 0.03,
             "leak_risk_delta": 0.05,
             "relationship_delta": 0.02,
-            "notes": ["Secret trade language raises leak exposure."],
         }
     if any(token in lowered for token in ["non-invasion", "non invasion", "pledge", "guarantee"]):
         return {
-            "accepted": True,
             "response_text": (
                 "A private non-invasion assurance could move Moscow if it is paired "
                 "with a face-saving public path for missile removal."
             ),
-            "stance": "constructive",
             "trust_delta": 0.04,
             "leak_risk_delta": 0.01,
             "relationship_delta": 0.03,
-            "notes": ["Constructive reciprocal language keeps the channel useful."],
         }
     return {
-        "accepted": True,
         "response_text": (
             "The message is noted. Moscow needs a more specific settlement formula "
             "before changing its public position."
         ),
-        "stance": "cautious",
         "trust_delta": 0.0,
         "leak_risk_delta": 0.0,
         "relationship_delta": 0.0,
-        "notes": [],
-    }
-
-
-def _backchannel_availability_check(context: dict[str, Any]) -> dict[str, Any]:
-    extra = context.get("extra", {})
-    target_query = ""
-    if isinstance(extra, dict):
-        target_query = str(extra.get("backchannel_target_query", ""))
-    query = target_query.strip().lower().replace("_", " ")
-    profiles = context.get("actor_public_profiles", [])
-    if isinstance(profiles, list):
-        for profile in profiles:
-            if not isinstance(profile, dict):
-                continue
-            entity_id = str(profile.get("entity_id", ""))
-            name = str(profile.get("name", ""))
-            candidates = {
-                entity_id.lower().replace("_", " "),
-                name.lower().replace("_", " "),
-            }
-            if query in candidates or any(candidate.startswith(query) for candidate in candidates):
-                return {
-                    "allowed": True,
-                    "available": True,
-                    "target_entity_id": entity_id,
-                    "target_label": name or entity_id,
-                    "reason": "Target maps to a scenario actor with gamestate.",
-                    "confidence": 0.9,
-                }
-    return {
-        "allowed": True,
-        "available": False,
-        "target_entity_id": "",
-        "target_label": target_query,
-        "reason": "Target has no scenario actor gamestate.",
-        "confidence": 0.8,
     }
 
 
@@ -374,10 +301,6 @@ def _backchannel_state_change(context: dict[str, Any]) -> dict[str, Any]:
                     "confidence": 0.62,
                 }
             ],
-            "trust_delta": -0.04,
-            "leak_risk_delta": 0.03,
-            "relationship_delta": -0.04,
-            "notes": ["Threatening backchannel language reduces confidence."],
         }
     if any(token in lowered for token in ["jupiter", "turkey", "trade", "swap"]):
         return {
@@ -390,10 +313,6 @@ def _backchannel_state_change(context: dict[str, Any]) -> dict[str, Any]:
                     "confidence": 0.58,
                 }
             ],
-            "trust_delta": 0.02,
-            "leak_risk_delta": 0.04,
-            "relationship_delta": 0.02,
-            "notes": ["Secret trade talk is useful but leak-prone."],
         }
     if any(token in lowered for token in ["non-invasion", "non invasion", "pledge", "guarantee"]):
         return {
@@ -406,24 +325,17 @@ def _backchannel_state_change(context: dict[str, Any]) -> dict[str, Any]:
                     "confidence": 0.64,
                 }
             ],
-            "trust_delta": 0.03,
-            "leak_risk_delta": 0.01,
-            "relationship_delta": 0.03,
-            "notes": ["Constructive settlement language preserves the channel."],
         }
     return {
         "memory_note": "The backchannel exchange was cautious and did not settle concrete terms.",
         "unresolved_thread": "Ask for a more specific settlement formula before changing posture.",
         "belief_updates": [],
-        "trust_delta": 0.0,
-        "leak_risk_delta": 0.0,
-        "relationship_delta": 0.0,
-        "notes": [],
     }
 
 
 def _intent_compilation(context: dict[str, Any]) -> dict[str, Any]:
-    text = _player_message(context).lower()
+    raw_text = _player_message(context)
+    text = raw_text.lower()
     actor_id = str(context.get("entity", {}).get("entity_id", "us_excomm"))
     target_id = _preferred_target(context, actor_id)
     if any(token in text for token in ["hold", "wait", "no action", "stand down", "end turn"]):
@@ -432,7 +344,22 @@ def _intent_compilation(context: dict[str, Any]) -> dict[str, Any]:
             "errors": [],
             "notes": ["Player chose to hold formal action this turn."],
         }
-    if any(token in text for token in ["jupiter", "turkey", "missile trade", "swap", "trade"]):
+    if _looks_unorthodox(text):
+        return _accepted_intent(
+            "cuba_unorthodox_gambit",
+            target_ids=[target_id],
+            channel=(
+                "private_diplomatic"
+                if any(token in text for token in ["private", "secret", "backchannel", "tell"])
+                else "rumor"
+            ),
+            intent_summary=f"Pursue an unorthodox crisis gambit: {raw_text[:140]}",
+            private_rationale="Preserve the player's premise without awarding a historical settlement effect.",
+            commitment_level=0.45,
+            parameters={"premise": raw_text},
+            notes=["Mapped absurd or ahistorical player premise to the unorthodox gambit."],
+        )
+    if any(token in text for token in ["jupiter", "turkey", "missile trade", "missile swap"]):
         return _accepted_intent(
             "cuba_secret_jupiter_trade",
             target_ids=["soviet_presidium"],
@@ -440,8 +367,6 @@ def _intent_compilation(context: dict[str, Any]) -> dict[str, Any]:
             intent_summary="Privately float a deniable Jupiter missile understanding.",
             private_rationale="Offer Moscow a face-saving exit while keeping the trade out of public view.",
             commitment_level=0.55,
-            risk_acceptance=0.5,
-            fallback_condition="Deny a formal trade if the channel leaks.",
             notes=["Mapped player intent to the secret Jupiter trade capability."],
         )
     if any(token in text for token in ["non-invasion", "non invasion", "pledge", "guarantee"]):
@@ -452,7 +377,6 @@ def _intent_compilation(context: dict[str, Any]) -> dict[str, Any]:
             intent_summary="Offer a private non-invasion pledge if offensive missiles are removed.",
             private_rationale="Reduce Cuban invasion fear and give Moscow a defendable settlement.",
             commitment_level=0.6,
-            risk_acceptance=0.35,
             notes=["Mapped player intent to the non-invasion pledge capability."],
         )
     if any(token in text for token in ["air strike", "airstrike", "strike", "bomb", "invasion"]):
@@ -463,7 +387,6 @@ def _intent_compilation(context: dict[str, Any]) -> dict[str, Any]:
             intent_summary="Prepare air strike options against missile sites in Cuba.",
             private_rationale="Keep a coercive option ready if missiles become operational.",
             commitment_level=0.85,
-            risk_acceptance=0.8,
             notes=["Mapped player intent to the air strike preparation capability."],
         )
     if any(token in text for token in ["defcon", "readiness", "alert", "strategic"]):
@@ -474,7 +397,6 @@ def _intent_compilation(context: dict[str, Any]) -> dict[str, Any]:
             intent_summary="Raise strategic readiness to signal that escalation is being watched.",
             private_rationale="Deter a Soviet probe while preparing for rapid movement.",
             commitment_level=0.75,
-            risk_acceptance=0.68,
             notes=["Mapped player intent to the strategic readiness capability."],
         )
     if any(token in text for token in ["recon", "u-2", "u2", "surveillance", "overflight"]):
@@ -485,7 +407,6 @@ def _intent_compilation(context: dict[str, Any]) -> dict[str, Any]:
             intent_summary="Authorize additional reconnaissance overflights to track missile readiness.",
             private_rationale="Clarify site readiness before choosing irreversible military action.",
             commitment_level=0.55,
-            risk_acceptance=0.45,
             notes=["Mapped player intent to the reconnaissance capability."],
         )
     if any(token in text for token in ["quarantine", "blockade", "fleet", "naval"]):
@@ -497,7 +418,6 @@ def _intent_compilation(context: dict[str, Any]) -> dict[str, Any]:
             public_rationale="The United States will quarantine further offensive military shipments to Cuba.",
             private_rationale="Create bounded pressure while preserving room for a private settlement.",
             commitment_level=0.72,
-            risk_acceptance=0.65,
             notes=["Mapped player intent to the naval quarantine capability."],
         )
     if any(token in text for token in ["public", "warn", "warning", "announce", "statement", "declare"]):
@@ -509,7 +429,6 @@ def _intent_compilation(context: dict[str, Any]) -> dict[str, Any]:
             public_rationale="Offensive missile bases in Cuba must be dismantled and removed.",
             private_rationale="Use public clarity to anchor allied and domestic support.",
             commitment_level=0.65,
-            risk_acceptance=0.55,
             notes=["Mapped player intent to the public demand capability."],
         )
     return _accepted_intent(
@@ -519,7 +438,6 @@ def _intent_compilation(context: dict[str, Any]) -> dict[str, Any]:
         intent_summary="Open a quiet Kremlin channel to explore missile withdrawal terms.",
         private_rationale="Test an off-ramp without forcing public concessions.",
         commitment_level=0.45,
-        risk_acceptance=0.3,
         notes=["Mapped player intent to the private Kremlin channel capability."],
     )
 
@@ -533,8 +451,6 @@ def _accepted_intent(
     public_rationale: str = "",
     private_rationale: str = "",
     commitment_level: float = 0.5,
-    risk_acceptance: float = 0.5,
-    fallback_condition: str | None = None,
     parameters: dict[str, Any] | None = None,
     notes: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -548,8 +464,6 @@ def _accepted_intent(
         "public_rationale": public_rationale,
         "private_rationale": private_rationale,
         "commitment_level": commitment_level,
-        "risk_acceptance": risk_acceptance,
-        "fallback_condition": fallback_condition,
         "parameters": parameters or {},
         "notes": notes or [],
     }
@@ -593,6 +507,7 @@ def _candidate_for_scripted_capability(
         "cuba_secret_jupiter_trade": "jupiter",
         "cuba_direct_kremlin_message": source_text,
         "cuba_offer_non_invasion_pledge": "non-invasion pledge",
+        "cuba_unorthodox_gambit": source_text,
         "cuba_prepare_air_strike": "air strike",
         "cuba_raise_defcon_readiness": "defcon readiness",
         "cuba_recon_overflights": "recon overflights",
@@ -605,6 +520,8 @@ def _candidate_for_scripted_capability(
     candidate = _intent_compilation(candidate_context)
     if capability_id == "cuba_direct_kremlin_message":
         candidate["parameters"] = {"message_text": source_text}
+    if capability_id == "cuba_unorthodox_gambit":
+        candidate["parameters"] = {"premise": source_text}
     candidate["source_span"] = source_text[:SCRIPTED_SOURCE_SPAN_LIMIT]
     return candidate
 
@@ -735,8 +652,6 @@ def _faction_decision(context: dict[str, Any]) -> dict[str, Any]:
             "intent_summary": "Privately ask whether non-invasion and reciprocal restraint can settle the crisis.",
             "private_rationale": "A deniable probe protects Soviet prestige while testing a settlement.",
             "commitment_level": 0.5,
-            "risk_acceptance": 0.35,
-            "fallback_condition": "If Washington rejects the probe, resume public defiance.",
             "parameters": {},
             "confidence": 0.68,
         }
@@ -749,8 +664,6 @@ def _faction_decision(context: dict[str, Any]) -> dict[str, Any]:
             "intent_summary": "Raise Cuban air defense alert in response to invasion fears.",
             "private_rationale": "Signal that Cuba will resist attack and must not be ignored in talks.",
             "commitment_level": 0.7,
-            "risk_acceptance": 0.62,
-            "fallback_condition": "If Moscow reins in local posture, keep alert below public panic.",
             "parameters": {},
             "confidence": 0.64,
         }
@@ -763,8 +676,6 @@ def _faction_decision(context: dict[str, Any]) -> dict[str, Any]:
             "intent_summary": "Privately ask Washington for consultation and reassurance before the next public move.",
             "private_rationale": "Alliance support is easier to sustain when allies are not surprised.",
             "commitment_level": 0.45,
-            "risk_acceptance": 0.25,
-            "fallback_condition": "If ignored, reduce public enthusiasm without breaking solidarity.",
             "parameters": {},
             "confidence": 0.7,
         }
@@ -777,8 +688,6 @@ def _faction_decision(context: dict[str, Any]) -> dict[str, Any]:
         "intent_summary": "Privately test whether reciprocal restraint is still available.",
         "private_rationale": "A deniable probe preserves face while reducing accident risk.",
         "commitment_level": 0.45,
-        "risk_acceptance": 0.35,
-        "fallback_condition": "If the channel leaks, deny any concession while keeping talks open.",
         "parameters": {},
         "confidence": 0.68,
     }
@@ -800,14 +709,6 @@ def _international_pressure(context: dict[str, Any]) -> dict[str, Any]:
     public_summary = _latest_public_summary(context)
     return {
         "situation_summary": f"External actors see a widening Cuba crisis: {public_summary}",
-        "legitimacy_concerns": [
-            "A quarantine needs legal and regional legitimacy to avoid looking like a blockade.",
-            "Military preparations sharpen humanitarian, market, and nuclear anxiety.",
-        ],
-        "requested_restraints": [
-            "Keep a channel open through the UN, OAS, or a private intermediary.",
-            "Avoid air strikes while ships, aircraft, and local commanders are in close contact.",
-        ],
         "pressure_signals": [
             {
                 "channel": "media",
@@ -818,7 +719,6 @@ def _international_pressure(context: dict[str, Any]) -> dict[str, Any]:
                 "urgency": 0.6,
             }
         ],
-        "escalation_read": 0.62,
     }
 
 
@@ -843,7 +743,6 @@ def _event_candidate(context: dict[str, Any]) -> dict[str, Any]:
                 }
             ],
             "deterministic_effect_hints": {"allied_confidence": -0.02},
-            "reason_to_include": "Allied pressure complicates any secret Jupiter or public quarantine package.",
         }
     return {
         "candidate_id": f"recon_confusion_{turn}",
@@ -867,7 +766,6 @@ def _event_candidate(context: dict[str, Any]) -> dict[str, Any]:
                 "command_and_control_risk": 0.02,
                 "public_alarm": 0.01,
             },
-            "reason_to_include": "Accidents, ambiguous signals, and local initiative should keep pressure alive.",
         }
 
 
@@ -879,11 +777,6 @@ def _event_creator_response(context: dict[str, Any]) -> dict[str, Any]:
     return {
         "public_brief": public_brief,
         "event_candidate": candidate,
-        "major_event_relevant": True,
-        "editorial_notes": [
-            "Public-facing coverage emphasizes visible crisis pressure and omits private channels.",
-            "A major event candidate remains subject to deterministic approval.",
-        ],
     }
 
 
@@ -892,9 +785,6 @@ def _public_brief(context: dict[str, Any]) -> dict[str, Any]:
         "headline": "Crisis Diplomacy Continues",
         "summary": _latest_public_summary(context),
         "public_risk_read": "Public alarm remains elevated.",
-        "safe_known_facts": [_latest_public_summary(context)],
-        "public_uncertainties": ["Private diplomatic positions remain unclear."],
-        "omitted_private_topics": ["Inbox reports and hidden clocks are not public facts."],
     }
 
 
@@ -911,27 +801,13 @@ def _signal_distortion_response(context: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _aar_summary(context: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "outcome_summary": "The debug session ended with the crisis still active.",
-        "turning_points": [],
-        "causal_factors": [
-            "Public pressure, private channels, and event pressure interacted across turns."
-        ],
-        "missed_offramps": [],
-        "uncertainty_notes": ["This scripted summary is deterministic and non-omniscient."],
-    }
-
-
 def _extract_visible_context(request: LLMRequest) -> dict[str, Any]:
     for message in request.messages:
         marker = "Visible context JSON:\n"
         if marker not in message.content:
             continue
         start = message.content.index(marker) + len(marker)
-        end_marker = "\n\nTask:\n"
-        end = message.content.find(end_marker, start)
-        raw_json = message.content[start:] if end == -1 else message.content[start:end]
+        raw_json = message.content[start:]
         try:
             parsed = json.loads(raw_json)
         except json.JSONDecodeError:
@@ -956,7 +832,9 @@ def _latest_public_summary(context: dict[str, Any]) -> str:
 
 def _suggested_capability_ids(context: dict[str, Any], player_message: str) -> list[str]:
     lowered = player_message.lower()
-    if any(token in lowered for token in ["jupiter", "turkey", "trade", "swap"]):
+    if _looks_unorthodox(lowered):
+        return ["cuba_unorthodox_gambit"]
+    if any(token in lowered for token in ["jupiter", "turkey", "missile trade", "missile swap"]):
         return ["cuba_secret_jupiter_trade", "cuba_open_kremlin_channel"]
     if any(token in lowered for token in ["pledge", "guarantee", "non-invasion", "non invasion"]):
         return ["cuba_offer_non_invasion_pledge", "cuba_open_kremlin_channel"]
@@ -981,8 +859,10 @@ def _action_ids_for_capabilities(capability_ids: list[str]) -> list[str]:
 
 
 def _capability_ids_for_player_text(lowered_text: str) -> list[str]:
+    if _looks_unorthodox(lowered_text):
+        return ["cuba_unorthodox_gambit"]
     token_groups = {
-        "cuba_secret_jupiter_trade": ["jupiter", "turkey", "missile trade", "swap", "trade"],
+        "cuba_secret_jupiter_trade": ["jupiter", "turkey", "missile trade", "missile swap"],
         "cuba_offer_non_invasion_pledge": [
             "non-invasion",
             "non invasion",
@@ -1026,6 +906,25 @@ def _capability_ids_for_player_text(lowered_text: str) -> list[str]:
         if capability_id not in ordered:
             ordered.append(capability_id)
     return ordered
+
+
+def _looks_unorthodox(lowered_text: str) -> bool:
+    return any(
+        token in lowered_text
+        for token in [
+            "alien",
+            "alaska",
+            "mars",
+            "moon landing",
+            "cyber",
+            "drone",
+            "teleport",
+            "colony ship",
+            "nationalize",
+            "arrest khrushchev",
+            "join nato",
+        ]
+    )
 
 
 def _preferred_target(

@@ -4,6 +4,7 @@ from crisis_room.agents.base import AgentOutput
 from crisis_room.agents.context import build_task_request, build_visible_context
 from crisis_room.agents.signal_builders import signal_from_candidate
 from crisis_room.llm.contracts import LLMClient
+from crisis_room.llm.prompts import INTERNATIONAL_SYSTEM, INTERNATIONAL_TASK
 from crisis_room.llm.task_contracts import InternationalPressure
 from crisis_room.state.world import EntityState, WorldStateV2
 
@@ -23,19 +24,9 @@ class InternationalCommunityAgent:
         visible_context = build_visible_context(entity_state, world_state)
         request = build_task_request(
             label=f"international.{entity_state.entity_id}.pressure",
-            system_prompt=(
-                "You are the international community pressure model: institutions, "
-                "non-aligned governments, media, markets, humanitarian groups, and "
-                "external legitimacy. Use only visible context."
-            ),
+            system_prompt=INTERNATIONAL_SYSTEM,
             visible_context=visible_context,
-            task_instruction=(
-                "Produce the external pressure response for this turn. Pressure "
-                "signals should be public or plausibly diplomatic information "
-                "packets, not direct mutations of game state. Separate legitimacy "
-                "concerns from requested restraints, and target signals only at "
-                "visible entity ids when a specific recipient is needed."
-            ),
+            task_instruction=INTERNATIONAL_TASK,
             response_schema_name="InternationalPressure",
             metadata={
                 "agent": self.entity_id,
@@ -60,7 +51,6 @@ class InternationalCommunityAgent:
         return AgentOutput(
             entity_id=entity_state.entity_id,
             perception_summary=pressure.situation_summary,
-            internal_debate=pressure.legitimacy_concerns + pressure.requested_restraints,
             emitted_signals=emitted_signals,
             raw_llm_outputs=[
                 {"task": "international_pressure", "response": pressure.model_dump(mode="json")}

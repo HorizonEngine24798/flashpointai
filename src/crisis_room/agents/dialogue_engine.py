@@ -3,7 +3,13 @@ from __future__ import annotations
 from crisis_room.agents.context import build_task_request, build_visible_context
 from crisis_room.config.gameplay import DIALOGUE_MAX_TOKENS
 from crisis_room.engine.actions import ActionDefinition, ScenarioCapability
-from crisis_room.llm.contracts import LLMClient
+from crisis_room.llm.contracts import ChatRole, LLMClient, LLMMessage, LLMRequest
+from crisis_room.llm.diagnostics import LlamaCppJSONError
+from crisis_room.llm.prompts import (
+    ADVISOR_JSON_RETRY_INSTRUCTION,
+    ADVISOR_SYSTEM,
+    ADVISOR_TASK,
+)
 from crisis_room.llm.task_contracts import AdvisorCouncilResponse
 from crisis_room.state.world import WorldStateV2
 
@@ -29,6 +35,7 @@ class DialogueEngineAgent:
         player_entity_id: str,
         player_message: str,
         llm_client: LLMClient,
+        json_retries: int = 0,
     ) -> AdvisorCouncilResponse:
         player_state = world_state.require_entity(player_entity_id)
         visible_context = build_visible_context(
@@ -41,26 +48,9 @@ class DialogueEngineAgent:
         )
         request = build_task_request(
             label=f"dialogue.{player_entity_id}.advisor_response",
-            system_prompt=(
-                "You are the crisis room dialogue engine. Simulate multiple "
-                "stable advisor perspectives for the player, using only the "
-                "provided visible context. Be candid about uncertainty and "
-                "tradeoffs."
-            ),
+            system_prompt=ADVISOR_SYSTEM,
             visible_context=visible_context,
-            task_instruction=(
-                "Answer the player's message as contested crisis-room advice. "
-                "Use only advisor_id values listed in advisor_council. "
-                "Let memory, recent embarrassment, and inter-advisor trust shape "
-                "the tone of each advisor view. Use risk_warnings for concrete "
-                "hazards, suggested_capability_ids only for capabilities listed "
-                "in the visible action catalog, and visible_context_limits for "
-                "important things the player may not know. If you propose "
-                "advisor deltas, keep them small and tie them to the answer. Do "
-                "not imply access to hidden clocks, truth metrics, or private "
-                "rival state unless that information appears in the visible "
-                "context."
-            ),
+            task_instruction=ADVISOR_TASK,
             response_schema_name="AdvisorCouncilResponse",
             metadata={
                 "agent": self.entity_id,
@@ -69,14 +59,21 @@ class DialogueEngineAgent:
             },
             max_tokens=DIALOGUE_MAX_TOKENS,
         )
-        response = llm_client.complete_json(request, AdvisorCouncilResponse)
-        return _validated_council_response(
-            response,
-            world_state,
-            player_entity_id=player_entity_id,
-            capabilities=self.capabilities,
-            action_catalog=self.action_catalog,
-        )
+        for attempt in range(json_retries + 1):
+            attempt_request = request if attempt == 0 else _retry_request(request)
+            try:
+                response = llm_client.complete_json(attempt_request, AdvisorCouncilResponse)
+                return _validated_council_response(
+                    response,
+                    world_state,
+                    player_entity_id=player_entity_id,
+                    capabilities=self.capabilities,
+                    action_catalog=self.action_catalog,
+                )
+            except LlamaCppJSONError:
+                if attempt >= json_retries:
+                    raise
+        raise RuntimeError("unreachable advisor retry state")
 
     def answer(
         self,
@@ -85,13 +82,30 @@ class DialogueEngineAgent:
         player_entity_id: str,
         player_message: str,
         llm_client: LLMClient,
+        json_retries: int = 0,
     ) -> AdvisorCouncilResponse:
         return self.respond_to_player(
             world_state,
             player_entity_id=player_entity_id,
             player_message=player_message,
             llm_client=llm_client,
+            json_retries=json_retries,
         )
+
+
+def _retry_request(request: LLMRequest) -> LLMRequest:
+    messages = [message.model_copy() for message in request.messages]
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].role == ChatRole.USER:
+            messages[index].content = (
+                f"{messages[index].content}\n\n{ADVISOR_JSON_RETRY_INSTRUCTION}"
+            )
+            break
+    else:
+        messages.append(
+            LLMMessage(role=ChatRole.USER, content=ADVISOR_JSON_RETRY_INSTRUCTION)
+        )
+    return request.model_copy(update={"messages": messages})
 
 
 def _validated_council_response(

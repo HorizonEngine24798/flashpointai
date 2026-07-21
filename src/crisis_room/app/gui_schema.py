@@ -118,6 +118,7 @@ class AgendaView(BaseModel):
 
 class PlanPreviewActionView(BaseModel):
     title: str
+    intent_summary: str = ""
     action_id: str
     capability_id: str | None = None
     target_ids: list[str] = Field(default_factory=list)
@@ -132,18 +133,33 @@ class PlanPreviewView(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+    known_pending_actions: list[str] = Field(default_factory=list)
+    resource_pressure: list[str] = Field(default_factory=list)
+    open_backchannel_constraints: list[str] = Field(default_factory=list)
+    recent_event_context: list[str] = Field(default_factory=list)
+    visible_flash_event_risks: list[str] = Field(default_factory=list)
+    known_consequences: list[str] = Field(default_factory=list)
+    compiled_intents: list[str] = Field(default_factory=list)
+    rejected_intents: list[str] = Field(default_factory=list)
+    unprocessed_intents: list[str] = Field(default_factory=list)
+    action_slots_used: int = 0
+    action_slots_available: int = 0
     rendered_text: str = ""
 
 
 class TurnResultView(BaseModel):
     turn_number: int
     accepted_actions: list[str] = Field(default_factory=list)
+    resolved_actions: list[str] = Field(default_factory=list)
     rejected_actions: list[str] = Field(default_factory=list)
+    resource_blocked_actions: list[str] = Field(default_factory=list)
     scheduled_actions: list[str] = Field(default_factory=list)
+    critical_warnings: list[str] = Field(default_factory=list)
     batch_warnings: list[str] = Field(default_factory=list)
     flash_events: list[str] = Field(default_factory=list)
     media_headlines: list[str] = Field(default_factory=list)
     consequences: list[str] = Field(default_factory=list)
+    pressure_updates: list[str] = Field(default_factory=list)
     advisor_reactions: list[str] = Field(default_factory=list)
     npc_reactions: list[str] = Field(default_factory=list)
     new_problems: list[ProblemView] = Field(default_factory=list)
@@ -157,10 +173,13 @@ class AdvisorDialogueView(BaseModel):
     advisor_views: list[str] = Field(default_factory=list)
     risk_warnings: list[str] = Field(default_factory=list)
     suggested_moves: list[str] = Field(default_factory=list)
+    information_gaps: list[str] = Field(default_factory=list)
+    visible_context_limits: list[str] = Field(default_factory=list)
 
 
 class BackchannelThreadView(BaseModel):
     thread_id: str
+    target_id: str
     counterpart: str
     status: str
     expires_turn: int
@@ -168,6 +187,14 @@ class BackchannelThreadView(BaseModel):
     trust_band: str
     leak_risk_band: str
     latest: str = ""
+
+
+class ChannelMessageView(BaseModel):
+    message_id: str
+    sender: str
+    text: str
+    turn: int
+    is_player: bool = False
 
 
 class PendingEventOptionView(BaseModel):
@@ -283,6 +310,8 @@ class ControlRoomView(BaseModel):
     situation_summary: str = ""
     open_problems: list[ProblemView] = Field(default_factory=list)
     recent_results: list[str] = Field(default_factory=list)
+    latest_result: TurnResultView | None = None
+    critical_warnings: list[str] = Field(default_factory=list)
     pressure: list[PressureView] = Field(default_factory=list)
     resources: list[ResourceView] = Field(default_factory=list)
     agenda: AgendaView
@@ -317,6 +346,7 @@ class AdvisorRoomView(BaseModel):
     figures: list[AdvisorFigureView] = Field(default_factory=list)
     proposals: list[AdvisorProposalView] = Field(default_factory=list)
     council_messages: list[str] = Field(default_factory=list)
+    council_read: list[str] = Field(default_factory=list)
     agenda: AgendaView
     agenda_conflicts: list[AgendaConflictView] = Field(default_factory=list)
     latest_dialogue: AdvisorDialogueView | None = None
@@ -324,6 +354,7 @@ class AdvisorRoomView(BaseModel):
 
 class ChannelThreadView(BaseModel):
     thread_id: str
+    target_id: str
     counterpart: str
     status: str
     expires_turn: int
@@ -331,6 +362,7 @@ class ChannelThreadView(BaseModel):
     trust_band: str
     leak_risk_band: str
     latest: str = ""
+    messages: list[ChannelMessageView] = Field(default_factory=list)
     unread: bool = False
 
 
@@ -377,6 +409,7 @@ class GameView(BaseModel):
     asset_manifest: AssetManifestView = Field(default_factory=AssetManifestView)
     agenda: AgendaView
     plan_preview: PlanPreviewView | None = None
+    pending_event_choices: list[PendingEventChoiceView] = Field(default_factory=list)
     ending_offers: list[EndingOfferView] = Field(default_factory=list)
     saves: list[SaveSummaryView] = Field(default_factory=list)
     debug: DebugView | None = None

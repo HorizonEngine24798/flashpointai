@@ -7,6 +7,9 @@ import controlTension4 from "./assets/rooms/control_tension_4.png";
 import advisorsRoom from "./assets/rooms/advisors_room.png";
 import mediaRoom from "./assets/rooms/media_room.png";
 import cubaScenario from "./assets/scenarios/cuba_missile_crisis.png";
+import endingEscalation from "./assets/endings/escalation.png";
+import endingFailedControl from "./assets/endings/failed_control.png";
+import endingSettlement from "./assets/endings/settlement.png";
 import shadowedState from "./assets/advisors/shadowed_state.png";
 import shadowedDefense from "./assets/advisors/shadowed_defense.png";
 import shadowedIntelligence from "./assets/advisors/shadowed_intelligence.png";
@@ -23,10 +26,8 @@ import actionButtonIdle from "./assets/ui/action_button_idle.png";
 import actionButtonHover from "./assets/ui/action_button_hover.png";
 import actionButtonPressed from "./assets/ui/action_button_pressed.png";
 import actionButtonDisabled from "./assets/ui/action_button_disabled.png";
-import noiseGrain from "./assets/ui/noise_grain.png";
 import tickerStaticStrip from "./assets/ui/ticker_static_strip.png";
 import tvStaticSource from "./assets/ui/tv_static_loop_source.png";
-import vignetteOverlay from "./assets/ui/vignette_overlay.png";
 
 const advisorVariantAssets = {
   state: {
@@ -108,10 +109,8 @@ const assets: Record<string, string> = {
   "ui/action_button_hover": actionButtonHover,
   "ui/action_button_pressed": actionButtonPressed,
   "ui/action_button_disabled": actionButtonDisabled,
-  "ui/noise_grain": noiseGrain,
   "ui/ticker_static_strip": tickerStaticStrip,
-  "ui/tv_static_loop_source": tvStaticSource,
-  "ui/vignette_overlay": vignetteOverlay
+  "ui/tv_static_loop_source": tvStaticSource
 };
 
 export function assetUrl(key: string, fallback = "rooms/control_tension_0") {
@@ -122,15 +121,18 @@ export function assetUrl(key: string, fallback = "rooms/control_tension_0") {
   return assets[key] ?? advisorAssetUrl(fallback) ?? assets[fallback] ?? "";
 }
 
+export function endingAssetUrl(endingId: string) {
+  if (endingId === "settlement_reached") return endingSettlement;
+  if (endingId === "nuclear_exchange") return endingEscalation;
+  return endingFailedControl;
+}
+
 export const roomAssets = {
   start: startScreen,
-  control: (key: string) => assetUrl(key),
   advisors: advisorsRoom,
   media: mediaRoom,
-  noise: noiseGrain,
   ticker: tickerStaticStrip,
   static: tvStaticSource,
-  vignette: vignetteOverlay,
   actionIdle: actionButtonIdle,
   actionHover: actionButtonHover,
   actionPressed: actionButtonPressed,

@@ -10,18 +10,18 @@ type ScenarioSelectProps = {
   onStart: (scenarioId: string) => void;
 };
 
+const fallbackScenarios: ScenarioOptionView[] = [
+  {
+    scenario_id: "cuban_missile_crisis_1962",
+    title: "Cuban Missile Crisis 1962",
+    historical_period: "October 1962",
+    description: "U.S. EXCOMM confronts Soviet missile deployment in Cuba.",
+    thumbnail_asset_key: "scenarios/cuba_missile_crisis"
+  }
+];
+
 export function ScenarioSelect({ scenarios, busy, onBack, onStart }: ScenarioSelectProps) {
-  const options = scenarios.length
-    ? scenarios
-    : [
-        {
-          scenario_id: "cuban_missile_crisis_1962",
-          title: "Cuban Missile Crisis 1962",
-          historical_period: "October 1962",
-          description: "U.S. EXCOMM confronts Soviet missile deployment in Cuba.",
-          thumbnail_asset_key: "scenarios/cuba_missile_crisis"
-        }
-      ];
+  const options = scenarios.length ? scenarios : fallbackScenarios;
 
   return (
     <main

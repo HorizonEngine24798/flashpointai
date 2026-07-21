@@ -6,8 +6,9 @@ from uuid import uuid4
 from crisis_room.app.debug_sessions import DebugSessionRecorder, load_debug_session
 from crisis_room.app.planning import build_player_plan_preview, render_player_plan_preview
 from crisis_room.app.turn_orchestrator import TurnOrchestrator
+from crisis_room.llm.contracts import FakeLLMClient
 from crisis_room.llm.scripted_client import ScriptedLLMClient
-from crisis_room.scenario.schema import build_cuban_missile_crisis_1962_scenario
+from crisis_room.scenario.cuba import build_cuban_missile_crisis_1962_scenario
 from crisis_room.state.saves import (
     load_playable_session,
     restore_pending_plan,
@@ -61,6 +62,45 @@ def test_plan_preview_compiles_actions_and_renders_batch_warnings() -> None:
     assert "Known consequences and risks:" in rendered
     assert "Quarantine contact nearing the line" in rendered
     assert "Type COMMIT" in rendered
+
+
+def test_failed_plan_preview_renders_recovery_hint() -> None:
+    scenario = build_cuban_missile_crisis_1962_scenario()
+    world = scenario.create_initial_world(rng_seed=911)
+    client = FakeLLMClient(
+        {
+            "gamemaster.us_excomm.intent_compilation": {
+                "accepted": False,
+                "candidates": [],
+                "rejected_intents": ["unclear move"],
+                "errors": ["no catalog action matched"],
+            }
+        }
+    )
+    orchestrator = TurnOrchestrator(
+        action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
+        llm_client=client,
+    )
+
+    preview = build_player_plan_preview(
+        world,
+        player_entity_id=scenario.player_entity_id,
+        player_intent="do something clever",
+        gamemaster=orchestrator.gamemaster,
+        action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
+    )
+    rendered = render_player_plan_preview(
+        preview,
+        action_catalog=scenario.action_catalog,
+        capabilities=scenario.capabilities,
+    )
+
+    assert not preview.is_committable
+    assert "Try next:" in rendered
+    assert "Type ACTIONS to inspect legal action names." in rendered
+    assert "ACTION open a private Kremlin channel to soviet_presidium" in rendered
 
 
 def test_committing_precompiled_plan_does_not_recompile_player_intent() -> None:

@@ -18,7 +18,6 @@ __all__ = [
     "CapabilityParameterKind",
     "DeterministicEngineV2",
     "DeterministicTurnResult",
-    "FakeDeterministicEngine",
     "ScenarioCapability",
 ]
 
@@ -28,7 +27,6 @@ def __getattr__(name: str) -> object:
         "CausalTraceEntry",
         "DeterministicEngineV2",
         "DeterministicTurnResult",
-        "FakeDeterministicEngine",
     }:
         from crisis_room.engine import adjudication
 

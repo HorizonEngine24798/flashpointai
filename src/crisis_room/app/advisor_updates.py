@@ -26,6 +26,14 @@ from crisis_room.engine.actions import (
 from crisis_room.engine.adjudication import DeterministicTurnResult
 from crisis_room.engine.clocks import clamp
 from crisis_room.llm.task_contracts import AdvisorCouncilResponse, AdvisorDeltaProposal
+from crisis_room.scenario.cuba import (
+    CUBA_AIR_DEFENSE_ALERT_CAPABILITY_ID,
+    CUBA_ANNOUNCE_NAVAL_QUARANTINE_CAPABILITY_ID,
+    CUBA_OFFER_NON_INVASION_PLEDGE_CAPABILITY_ID,
+    CUBA_OPEN_KREMLIN_CHANNEL_CAPABILITY_ID,
+    CUBA_PREPARE_AIR_STRIKE_CAPABILITY_ID,
+    CUBA_SECRET_JUPITER_TRADE_CAPABILITY_ID,
+)
 from crisis_room.state.advisors import (
     AdvisorBelief,
     AdvisorCouncilState,
@@ -277,7 +285,7 @@ def _react_to_player_action(
         )
 
     capability_id = package.mechanical_id
-    if capability_id == "cuba_announce_naval_quarantine":
+    if capability_id == CUBA_ANNOUNCE_NAVAL_QUARANTINE_CAPABILITY_ID:
         builder.bump(
             "state",
             reason="quarantine preserved a bounded pressure path",
@@ -291,7 +299,7 @@ def _react_to_player_action(
             confidence=0.015,
             recommendation="Use OAS, UN, and careful language to distinguish quarantine from blockade.",
         )
-    elif capability_id == "cuba_open_kremlin_channel":
+    elif capability_id == CUBA_OPEN_KREMLIN_CHANNEL_CAPABILITY_ID:
         builder.bump(
             "state",
             reason="private Kremlin channel opened",
@@ -303,7 +311,7 @@ def _react_to_player_action(
             belief_delta=0.04,
             recommendation="Use the channel for concrete reciprocal terms before public pressure peaks.",
         )
-    elif capability_id == "cuba_secret_jupiter_trade":
+    elif capability_id == CUBA_SECRET_JUPITER_TRADE_CAPABILITY_ID:
         builder.bump(
             "political",
             reason="secret Jupiter trade creates leak exposure",
@@ -317,7 +325,7 @@ def _react_to_player_action(
             trust=-0.015,
             paranoia=0.02,
         )
-    elif capability_id == "cuba_prepare_air_strike":
+    elif capability_id == CUBA_PREPARE_AIR_STRIKE_CAPABILITY_ID:
         builder.bump(
             "defense",
             reason="air strike option prepared",
@@ -332,7 +340,7 @@ def _react_to_player_action(
             urgency=0.04,
             paranoia=0.03,
         )
-    elif capability_id == "cuba_offer_non_invasion_pledge":
+    elif capability_id == CUBA_OFFER_NON_INVASION_PLEDGE_CAPABILITY_ID:
         builder.bump(
             "state",
             reason="non-invasion pledge supports a settlement path",
@@ -490,7 +498,7 @@ def _react_to_npc_actions(
             )
             builder.bump("defense", reason="Soviet public defiance", urgency=0.025)
             builder.bump("state", reason="Soviet public defiance", trust=-0.015)
-        elif capability_id == "cuba_air_defense_alert":
+        elif capability_id == CUBA_AIR_DEFENSE_ALERT_CAPABILITY_ID:
             builder.bump(
                 "intelligence",
                 reason="Cuban air defense alert raises local control concern",
@@ -690,13 +698,16 @@ def _apply_update(
                 advisor.trust_channels.get(channel, ADVISOR_BASE_CHANNEL_TRUST),
                 channel_delta,
             )
-        for topic, belief_delta in delta.belief_value_deltas.items():
+        belief_topics = set(delta.belief_value_deltas) | set(delta.belief_summaries)
+        for topic in belief_topics:
+            belief_delta = delta.belief_value_deltas.get(topic, 0.0)
             belief = advisor.beliefs.get(topic) or AdvisorBelief(topic=topic)
             belief.value = _add_clamped(belief.value, belief_delta)
-            belief.confidence = _add_clamped(
-                belief.confidence,
-                ADVISOR_BELIEF_CONFIDENCE_STEP,
-            )
+            if topic in delta.belief_value_deltas:
+                belief.confidence = _add_clamped(
+                    belief.confidence,
+                    ADVISOR_BELIEF_CONFIDENCE_STEP,
+                )
             belief.last_updated_turn = update.turn_number
             summary = delta.belief_summaries.get(topic)
             if summary:
@@ -788,6 +799,7 @@ def _delta_has_content(delta: AdvisorStateDelta) -> bool:
     ]
     return (
         any(abs(value) >= ADVISOR_VALUE_CHANGE_THRESHOLD for value in numeric)
+        or bool(delta.belief_summaries)
         or bool(delta.memory_notes)
         or bool(delta.recommendation_notes)
         or bool(delta.embarrassment_notes)

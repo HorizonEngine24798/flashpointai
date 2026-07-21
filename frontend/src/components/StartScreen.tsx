@@ -2,6 +2,7 @@ import { Play, RotateCcw, Settings } from "lucide-react";
 import type { CSSProperties } from "react";
 import type { SaveSummaryView, StartMenuView } from "../api/types";
 import { roomAssets } from "../assets";
+import { saveLabel } from "../format";
 
 type StartScreenProps = {
   startMenu?: StartMenuView;
@@ -65,12 +66,7 @@ export function StartScreen({
           </button>
         </div>
 
-        {recentSave ? (
-          <p className="save-hint">
-            {recentSave.scenario_title || recentSave.scenario_id} - turn{" "}
-            {recentSave.turn_number}
-          </p>
-        ) : null}
+        {recentSave ? <p className="save-hint">{saveLabel(recentSave)}</p> : null}
       </section>
     </main>
   );

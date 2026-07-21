@@ -111,6 +111,8 @@ STATUS          Same as BRIEFING
 ADVISORS        Show persistent council state
 BACKCHANNELS    Show active backchannel threads
 DEBUG           Toggle raw turn debug output
+DUMP            Toggle full debug dump mode
+PLAYER          Return to player-visible mode
 SAVE            Save the session JSON now
 HELP            Show commands
 QUIT            Save, exit, and close the managed server

@@ -3,7 +3,7 @@ from __future__ import annotations
 from crisis_room.app.presentation import render_aftermath_report
 from crisis_room.app.turn_orchestrator import TurnOrchestrator
 from crisis_room.llm.scripted_client import ScriptedLLMClient
-from crisis_room.scenario.schema import build_cuban_missile_crisis_1962_scenario
+from crisis_room.scenario.cuba import build_cuban_missile_crisis_1962_scenario
 from crisis_room.state.world import WorldStateV2
 
 

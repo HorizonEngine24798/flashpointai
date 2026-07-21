@@ -10,7 +10,7 @@ def test_skeleton_imports() -> None:
     assert __version__ == "0.0.0"
 
 
-def test_scenario_schema_imports_in_fresh_process() -> None:
+def test_cuba_scenario_imports_in_fresh_process() -> None:
     env = os.environ.copy()
     src_path = str(Path.cwd() / "src")
     env["PYTHONPATH"] = (
@@ -23,7 +23,7 @@ def test_scenario_schema_imports_in_fresh_process() -> None:
             sys.executable,
             "-c",
             (
-                "from crisis_room.scenario.schema import "
+                "from crisis_room.scenario.cuba import "
                 "build_cuban_missile_crisis_1962_scenario as build; "
                 "print(build().scenario_id)"
             ),
