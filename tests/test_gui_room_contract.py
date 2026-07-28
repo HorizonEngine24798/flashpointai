@@ -40,6 +40,9 @@ def test_game_view_exposes_room_contract(tmp_path: Path) -> None:
         "media",
     }
     assert view.control_room.situation_summary
+    assert view.control_room.chief_plan is not None
+    assert view.control_room.chief_plan.objectives
+    assert view.control_room.chief_plan.recommended_actions
     assert view.control_room.open_problems
     assert view.advisor_room.figures
     assert sum(figure.side == "left" for figure in view.advisor_room.figures) == sum(
@@ -55,6 +58,13 @@ def test_game_view_exposes_room_contract(tmp_path: Path) -> None:
     assert view.settings.fields
 
     view = session.end_turn()
+
+    assert view.control_room.latest_result is not None
+    assert view.control_room.latest_result.action_results == []
+    assert view.control_room.latest_result.chief_updates
+    assert [call.request.label for call in session.llm_client.calls].count(
+        "chief.us_excomm.plan_review"
+    ) == 2
 
     media_item = next(
         (

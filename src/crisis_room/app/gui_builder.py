@@ -29,6 +29,7 @@ from crisis_room.app.gui_schema import (
     BreakingNewsItemView,
     ChannelMessageView,
     ChannelThreadView,
+    ChiefPlanView,
     ControlRoomView,
     DebugView,
     EndingOfferView,
@@ -119,6 +120,11 @@ def build_game_view(session: GameSession) -> GameView:
             recent_results=_recent_result_lines(latest_result),
             latest_result=latest_result,
             critical_warnings=list(briefing.critical_warnings),
+            chief_plan=(
+                ChiefPlanView(**briefing.chief_plan.model_dump())
+                if briefing.chief_plan
+                else None
+            ),
             pressure=pressure,
             resources=resources,
             agenda=agenda,
@@ -161,6 +167,8 @@ def build_turn_result_view(
         rejected_actions=list(report.rejected_actions),
         resource_blocked_actions=list(report.resource_blocked_actions),
         scheduled_actions=list(report.scheduled_actions),
+        action_results=list(report.action_results),
+        chief_updates=list(report.chief_updates),
         critical_warnings=list(report.critical_warnings),
         batch_warnings=list(report.batch_warnings),
         flash_events=list(report.flash_events),

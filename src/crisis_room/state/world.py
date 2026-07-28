@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from enum import Enum
 
 from pydantic import BaseModel, Field
 
 from crisis_room.engine.actions import ActionPackage
-from crisis_room.state.advisors import AdvisorCouncilState, AdvisorCouncilUpdate
+from crisis_room.state.advisors import (
+    AdvisorCouncilState,
+    AdvisorCouncilUpdate,
+    ChiefPlanState,
+)
 from crisis_room.state.backchannels import BackchannelThread, BackchannelThreadUpdate
 from crisis_room.state.beliefs import BeliefState, InternalNarrative
 from crisis_room.state.endings import EndingOfferRecord
@@ -50,6 +55,7 @@ class WorldStateV2(BaseModel):
     relationships: dict[str, dict[str, float]] = Field(default_factory=dict)
     advisor_councils: dict[str, AdvisorCouncilState] = Field(default_factory=dict)
     advisor_update_history: list[AdvisorCouncilUpdate] = Field(default_factory=list)
+    chief_plan: ChiefPlanState | None = None
     backchannel_threads: dict[str, BackchannelThread] = Field(default_factory=dict)
     backchannel_update_history: list[BackchannelThreadUpdate] = Field(default_factory=list)
     event_history: list[ScenarioEventRecord] = Field(default_factory=list)
@@ -100,12 +106,14 @@ class WorldStateV2(BaseModel):
 
     def append_public(self, title: str, summary: str, **metadata: object) -> TimelineEntry:
         entry = TimelineEntry(
+            entry_id=f"public_{self.turn_number}_{len(self.public_timeline.entries) + 1}",
             turn=self.turn_number,
             scope=TimelineScope.PUBLIC,
             title=title,
             summary=summary,
             source="public_record",
             metadata=_timeline_metadata(metadata),
+            created_at=_deterministic_time(self.turn_number),
         )
         self.public_timeline.append(entry)
         return entry
@@ -116,6 +124,7 @@ class WorldStateV2(BaseModel):
         timeline = self.ensure_entity_timeline(delivery.recipient_entity_id)
         timeline.append(
             TimelineEntry(
+                entry_id=f"entity_{delivery.recipient_entity_id}_{delivery.delivery_id}",
                 turn=delivery.arrived_turn,
                 scope=TimelineScope.ENTITY_LOCAL,
                 title=f"Received {delivery.payload_type.value}",
@@ -130,6 +139,7 @@ class WorldStateV2(BaseModel):
                     "leaked": delivery.leak_applied,
                     "observed_reliability": delivery.observed_reliability,
                 },
+                created_at=_deterministic_time(delivery.arrived_turn),
             )
         )
 
@@ -146,6 +156,7 @@ class WorldStateV2(BaseModel):
     ) -> TimelineEntry:
         timeline = self.ensure_entity_timeline(entity_id)
         entry = TimelineEntry(
+            entry_id=f"entity_{self.turn_number}_{entity_id}_{len(timeline.entries) + 1}",
             turn=self.turn_number,
             scope=TimelineScope.ENTITY_LOCAL,
             title=title,
@@ -155,6 +166,7 @@ class WorldStateV2(BaseModel):
             signal_ids=signal_ids or [],
             tags=tags or [],
             metadata=_timeline_metadata(metadata),
+            created_at=_deterministic_time(self.turn_number),
         )
         timeline.append(entry)
         return entry
@@ -169,3 +181,7 @@ def _timeline_metadata(values: dict[str, object]) -> dict[str, str | int | float
         for key, value in values.items()
         if isinstance(value, str | int | float | bool)
     }
+
+
+def _deterministic_time(turn_number: int) -> datetime:
+    return datetime.fromtimestamp(turn_number, tz=timezone.utc)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from pydantic import BaseModel, Field
 
 from crisis_room.agents.base import AgentOutput
@@ -14,6 +16,7 @@ from crisis_room.app.backchannels import (
     build_formal_backchannel_response_signals,
     update_backchannel_threads,
 )
+from crisis_room.app.chief_of_staff import ChiefReviewResult, review_chief_plan
 from crisis_room.app.presentation import (
     TurnAftermathReport,
     TurnBriefing,
@@ -93,6 +96,7 @@ class TurnDebugTranscript(BaseModel):
     pressure_resolution: PressureResolution | None = None
     scenario_event_result: ScenarioEventResolution | None = None
     ending_result: EndingEvaluation | None = None
+    chief_review: ChiefReviewResult | None = None
     agent_outputs: dict[str, AgentOutput] = Field(default_factory=dict)
     event_output: AgentOutput | None = None
     deterministic_result: DeterministicTurnResult
@@ -114,6 +118,7 @@ class OrchestratedTurnResult(BaseModel):
     pressure_resolution: PressureResolution | None = None
     scenario_event_result: ScenarioEventResolution | None = None
     ending_result: EndingEvaluation | None = None
+    chief_review: ChiefReviewResult | None = None
     agent_outputs: dict[str, AgentOutput] = Field(default_factory=dict)
     event_output: AgentOutput | None = None
     deterministic_result: DeterministicTurnResult
@@ -138,9 +143,11 @@ class TurnOrchestrator:
         info_channel: PrototypeInfoChannel | None = None,
         action_budget: int = NORMAL_ACTION_BUDGET,
         hard_action_limit: int = HARD_ACTION_BUDGET,
+        enable_chief_of_staff: bool = False,
     ) -> None:
         self.action_budget = action_budget
         self.hard_action_limit = hard_action_limit
+        self.enable_chief_of_staff = enable_chief_of_staff
         self.action_catalog = action_catalog
         self.capabilities = capabilities or []
         self.scenario_events = [event.model_copy(deep=True) for event in scenario_events or []]
@@ -168,6 +175,24 @@ class TurnOrchestrator:
             hard_action_limit=hard_action_limit,
         )
         self.event_creator = EventCreatorAgent()
+
+    def initialize_chief_plan(
+        self,
+        world_state: WorldStateV2,
+        *,
+        player_entity_id: str,
+    ) -> ChiefReviewResult | None:
+        if not self.enable_chief_of_staff or world_state.chief_plan is not None:
+            return None
+        return review_chief_plan(
+            world_state,
+            player_entity_id=player_entity_id,
+            action_catalog=self.action_catalog,
+            capabilities=self.capabilities,
+            llm_client=self.llm_client,
+            action_budget=self.action_budget,
+            review_turn=world_state.turn_number,
+        )
 
     def run_turn(
         self,
@@ -241,6 +266,11 @@ class TurnOrchestrator:
         for output in agent_outputs.values():
             if output.action_package is not None:
                 action_packages.append(output.action_package)
+
+        action_packages = _stable_action_packages(
+            action_packages,
+            turn_number=working_world.turn_number,
+        )
 
         emitted_signals = [*agent_signals]
         batch_validation_report = build_batch_validation_report(
@@ -374,6 +404,18 @@ class TurnOrchestrator:
                 ending_result,
                 world_state=next_world,
             )
+        chief_review = None
+        if self.enable_chief_of_staff:
+            chief_review = review_chief_plan(
+                next_world,
+                player_entity_id=player_entity_id,
+                action_catalog=self.action_catalog,
+                capabilities=self.capabilities,
+                llm_client=self.llm_client,
+                action_budget=self.action_budget,
+                review_turn=next_world.turn_number + 1,
+                deterministic_result=deterministic_result,
+            )
         aftermath_report = build_turn_aftermath_report(
             before_world_state=working_world,
             after_world_state=next_world,
@@ -387,6 +429,7 @@ class TurnOrchestrator:
             scenario_event_result=scenario_event_result,
             event_output=event_output,
             pressure_resolution=pressure_resolution,
+            chief_updates=chief_review.update_lines if chief_review else [],
             action_budget=self.action_budget,
         )
         next_world.turn_number += 1
@@ -426,6 +469,7 @@ class TurnOrchestrator:
             pressure_resolution=pressure_resolution,
             scenario_event_result=scenario_event_result,
             ending_result=ending_result,
+            chief_review=chief_review,
             agent_outputs=agent_outputs,
             event_output=event_output,
             deterministic_result=deterministic_result,
@@ -446,6 +490,7 @@ class TurnOrchestrator:
             pressure_resolution=pressure_resolution,
             scenario_event_result=scenario_event_result,
             ending_result=ending_result,
+            chief_review=chief_review,
             agent_outputs=agent_outputs,
             event_output=event_output,
             deterministic_result=deterministic_result,
@@ -522,6 +567,30 @@ def _leak_triggered_scenario_events(
         if event.trigger.required_any_leaked_signal_action_ids
         or event.trigger.required_any_leaked_signal_capability_ids
     ]
+
+
+def _stable_action_packages(
+    packages: list[ActionPackage],
+    *,
+    turn_number: int,
+) -> list[ActionPackage]:
+    return [
+        package.model_copy(
+            deep=True,
+            update={
+                "package_id": (
+                    f"pkg_{turn_number}_{index}_"
+                    f"{_stable_id_part(package.actor_id)}_"
+                    f"{_stable_id_part(package.mechanical_id)}"
+                )
+            },
+        )
+        for index, package in enumerate(packages, start=1)
+    ]
+
+
+def _stable_id_part(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_") or "action"
 
 
 def _record_player_posture_observations(

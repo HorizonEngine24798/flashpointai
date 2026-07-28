@@ -11,6 +11,7 @@ from crisis_room.llm.task_contracts import (
     AdvisorCouncilResponse,
     BackchannelCounterpartResponse,
     BackchannelStateChange,
+    ChiefPlanResponse,
     EventCreatorResponse,
     FactionTurnResponse,
     InternationalPressure,
@@ -72,6 +73,8 @@ def _scripted_response(
         return _backchannel_counterpart_response(context)
     if response_model is BackchannelStateChange:
         return _backchannel_state_change(context)
+    if response_model is ChiefPlanResponse:
+        return _chief_plan_response(context)
     if response_model is MultiIntentCompilation:
         return _multi_intent_compilation(context)
     if response_model is FactionTurnResponse:
@@ -83,6 +86,70 @@ def _scripted_response(
     if response_model is SignalDistortionResponse:
         return _signal_distortion_response(context)
     return {}
+
+
+def _chief_plan_response(context: dict[str, Any]) -> dict[str, Any]:
+    extra = context.get("extra", {})
+    if not isinstance(extra, dict):
+        extra = {}
+    previous = extra.get("previous_plan")
+    legal = extra.get("legal_capability_ids", [])
+    legal_ids = [str(item) for item in legal] if isinstance(legal, list) else []
+    budget = int(extra.get("action_budget", 2))
+    recommendations = legal_ids[: max(budget, 0)]
+    actions = extra.get("last_player_actions", [])
+    previous_recommendations = (
+        previous.get("recommended_capability_ids", [])
+        if isinstance(previous, dict)
+        else []
+    )
+    followed = any(
+        isinstance(action, dict)
+        and action.get("status") in {"accepted", "resolved"}
+        and action.get("capability_id") in previous_recommendations
+        for action in actions
+    ) if isinstance(actions, list) else False
+    if previous and followed:
+        allowed_rewards = extra.get("allowed_reward_resources", [])
+        reward_resource = (
+            "political_capital"
+            if "political_capital" in allowed_rewards
+            else (str(allowed_rewards[0]) if allowed_rewards else "")
+        )
+        return {
+            "assessment": "completed",
+            "assessment_summary": (
+                "The prior objective was met: the President converted the Chief's "
+                "recommended course into a concrete move."
+            ),
+            "objectives": [
+                "Use the resulting signal to test the opponent while preserving control."
+            ],
+            "rationale": "Consolidate the gain before adding another irreversible commitment.",
+            "recommended_capability_ids": recommendations,
+            "reward_resource": reward_resource,
+            "reward_reason": "The staff can work more effectively after a coherent objective was executed.",
+        }
+    if isinstance(previous, dict):
+        return {
+            "assessment": "continue",
+            "assessment_summary": "The plan still fits the visible crisis and has not yet been completed.",
+            "objectives": previous.get("objectives") or [
+                "Create leverage while preserving a credible private off-ramp."
+            ],
+            "rationale": previous.get("rationale") or "Preserve options while testing intent.",
+            "recommended_capability_ids": recommendations,
+        }
+    return {
+        "assessment": "initial",
+        "assessment_summary": "The Chief recommends a controlled opening strategy.",
+        "objectives": [
+            "Create leverage while preserving a credible private off-ramp.",
+            "Improve the President's information before making an irreversible commitment.",
+        ],
+        "rationale": "A paired pressure-and-contact approach preserves room to learn and adjust.",
+        "recommended_capability_ids": recommendations,
+    }
 
 
 def _advisor_response(context: dict[str, Any]) -> dict[str, Any]:

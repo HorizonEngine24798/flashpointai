@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from crisis_room.agents.base import AgentOutput
 from crisis_room.agents.context import build_task_request
 from crisis_room.config.gameplay import (
@@ -126,6 +128,7 @@ def _scenario_public_event_context(
 
 def _public_brief_entry(world_state: WorldStateV2, brief: PublicBrief) -> TimelineEntry:
     return TimelineEntry(
+        entry_id=f"public_event_creator_{world_state.turn_number}",
         turn=world_state.turn_number,
         scope=TimelineScope.PUBLIC,
         title=brief.headline,
@@ -133,4 +136,5 @@ def _public_brief_entry(world_state: WorldStateV2, brief: PublicBrief) -> Timeli
         source="event_creator",
         tags=["media", "headline"],
         metadata={"public_risk_read": brief.public_risk_read},
+        created_at=datetime.fromtimestamp(world_state.turn_number, tz=timezone.utc),
     )

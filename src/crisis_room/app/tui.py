@@ -144,7 +144,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         player_id = loaded_save.player_entity_id
         pending_plan = restore_pending_plan(loaded_save)
     try:
-        llm_client = _build_llm_client()
+        llm_client = _build_llm_client(
+            campaign_seed=world.rng_seed,
+            response_cache_dir=args.output_dir.parent / "llm_response_cache",
+        )
     except Exception as exc:
         print(format_runtime_error("Local LLM startup", exc))
         return
@@ -160,7 +163,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             llm_client=llm_client,
             action_budget=args.action_budget,
             hard_action_limit=args.hard_action_limit,
+            enable_chief_of_staff=True,
         )
+        orchestrator.initialize_chief_plan(world, player_entity_id=player_id)
         dialogue_engine = DialogueEngineAgent(
             action_catalog=scenario.action_catalog,
             capabilities=scenario.capabilities,
@@ -1196,21 +1201,19 @@ def _maybe_end_at_max_turn(
     return True
 
 
-def _build_llm_client() -> LLMClient:
+def _build_llm_client(
+    *,
+    campaign_seed: int,
+    response_cache_dir: Path,
+) -> LLMClient:
     settings = load_settings().llama_cpp
-    client = LlamaCppServerClient(settings)
-    try:
-        print(f"Starting local LLM server: {settings.server_model}")
-        print(f"Endpoint: {settings.base_url}")
-        client.lease.ensure_running()
-        if client.lease.log_path is not None:
-            print(f"llama-server log: {client.lease.log_path}")
-        else:
-            print("Connected to existing llama-server endpoint.")
-        print()
-    except Exception:
-        client.close()
-        raise
+    client = LlamaCppServerClient(
+        settings,
+        campaign_seed=campaign_seed,
+        response_cache_dir=response_cache_dir,
+    )
+    print(f"LLM API model: {settings.server_model}")
+    print(f"Endpoint: {settings.base_url}\n")
     return client
 
 

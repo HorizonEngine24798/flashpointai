@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from pydantic import BaseModel, Field
 
 from crisis_room.engine.actions import ActionDefinition, ScenarioCapability
@@ -83,12 +85,35 @@ class Scenario(BaseModel):
             actors={entity.entity_id: entity.to_entity_state() for entity in self.entities},
             metadata={"player_entity_id": self.player_entity_id},
         )
-        for entry in self.initial_public_timeline:
-            world.public_timeline.append(entry)
-        for entry in self.initial_omniscient_timeline:
-            world.omniscient_timeline.append(entry)
+        for index, entry in enumerate(self.initial_public_timeline):
+            world.public_timeline.append(
+                _initial_entry(entry, self.scenario_id, "public", index)
+            )
+        for index, entry in enumerate(self.initial_omniscient_timeline):
+            world.omniscient_timeline.append(
+                _initial_entry(entry, self.scenario_id, "omniscient", index)
+            )
         for entity in self.entities:
             timeline = world.ensure_entity_timeline(entity.entity_id)
-            for entry in self.initial_entity_timelines.get(entity.entity_id, []):
-                timeline.append(entry)
+            for index, entry in enumerate(
+                self.initial_entity_timelines.get(entity.entity_id, [])
+            ):
+                timeline.append(
+                    _initial_entry(entry, self.scenario_id, entity.entity_id, index)
+                )
         return world
+
+
+def _initial_entry(
+    entry: TimelineEntry,
+    scenario_id: str,
+    scope: str,
+    index: int,
+) -> TimelineEntry:
+    return entry.model_copy(
+        deep=True,
+        update={
+            "entry_id": f"seed_{scenario_id}_{scope}_{index}",
+            "created_at": datetime.fromtimestamp(index, tz=timezone.utc),
+        },
+    )

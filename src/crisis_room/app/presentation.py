@@ -20,7 +20,6 @@ from crisis_room.config.gameplay import (
     DEFAULT_STAFF_ACTION_SLOTS,
     DEFAULT_UNKNOWN_METRIC_VALUE,
     DEFAULT_UNKNOWN_PROBABILITY,
-    DEFAULT_VISIBLE_CONSEQUENCE_RISK,
     ELEVATED_ADVISOR_PRESSURE_THRESHOLD,
     ELEVATED_RISK_BAND_THRESHOLD,
     EVENT_PROBLEM_LIMIT,
@@ -31,15 +30,12 @@ from crisis_room.config.gameplay import (
     HIGH_ESCALATION_RISK_THRESHOLD,
     HIGH_PRESSURE_THRESHOLD,
     HIGH_RISK_BAND_THRESHOLD,
-    HIGH_SEVERITY_THRESHOLD,
     LOW_CONFIDENCE_THRESHOLD,
     LOW_OFFRAMP_THRESHOLD,
     LOW_RISK_BAND_THRESHOLD,
-    LOW_SEVERITY_THRESHOLD,
     MAX_PROBABILITY,
     MEANINGFUL_ESCALATION_RISK_THRESHOLD,
     MEDIUM_CONFIDENCE_THRESHOLD,
-    MODERATE_SEVERITY_THRESHOLD,
     NORMAL_ACTION_BUDGET,
     NPC_REACTION_LIMIT,
     PENDING_ACTION_PROBLEM_LIMIT,
@@ -118,6 +114,14 @@ class AgendaBudget(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class ChiefPlanBrief(BaseModel):
+    plan_id: str
+    objectives: list[str] = Field(default_factory=list)
+    rationale: str = ""
+    recommended_actions: list[str] = Field(default_factory=list)
+    latest_assessment: str = ""
+
+
 class TurnBriefing(BaseModel):
     turn_number: int
     time_label: str = ""
@@ -126,6 +130,7 @@ class TurnBriefing(BaseModel):
     pressure_indicators: list[PressureIndicator] = Field(default_factory=list)
     critical_warnings: list[str] = Field(default_factory=list)
     council_read: list[str] = Field(default_factory=list)
+    chief_plan: ChiefPlanBrief | None = None
     agenda_budget: AgendaBudget = Field(default_factory=AgendaBudget)
     action_cards: list[ActionCard] = Field(default_factory=list)
 
@@ -145,6 +150,8 @@ class TurnAftermathReport(BaseModel):
     rejected_actions: list[str] = Field(default_factory=list)
     resource_blocked_actions: list[str] = Field(default_factory=list)
     scheduled_actions: list[str] = Field(default_factory=list)
+    action_results: list[str] = Field(default_factory=list)
+    chief_updates: list[str] = Field(default_factory=list)
     critical_warnings: list[str] = Field(default_factory=list)
     batch_warnings: list[str] = Field(default_factory=list)
     flash_events: list[str] = Field(default_factory=list)
@@ -175,6 +182,7 @@ def build_turn_briefing(
         pressure_indicators=_build_pressure_indicators(world_state, previous_world_state),
         critical_warnings=_critical_risk_warnings(world_state),
         council_read=_build_council_read(world_state, player_entity_id),
+        chief_plan=_chief_plan_brief(world_state, action_catalog, capabilities),
         agenda_budget=AgendaBudget(
             max_actions=action_budget,
             notes=[
@@ -206,6 +214,7 @@ def build_turn_aftermath_report(
     scenario_event_result: ScenarioEventResolution | None = None,
     event_output: AgentOutput | None = None,
     pressure_resolution: PressureResolution | None = None,
+    chief_updates: list[str] | None = None,
     action_budget: int = NORMAL_ACTION_BUDGET,
 ) -> TurnAftermathReport:
     resolver = ActionResolver(action_catalog, capabilities)
@@ -265,6 +274,12 @@ def build_turn_aftermath_report(
         rejected_actions=rejected,
         resource_blocked_actions=resource_blocked,
         scheduled_actions=scheduled,
+        action_results=_action_result_lines(
+            deterministic_result,
+            resolver,
+            player_entity_id,
+        ),
+        chief_updates=list(chief_updates or []),
         critical_warnings=_critical_risk_warnings(after_world_state),
         batch_warnings=_player_batch_warnings(batch_validation_report),
         flash_events=_flash_event_lines(scenario_event_result),
@@ -297,6 +312,17 @@ def render_turn_briefing(
     if briefing.critical_warnings:
         lines.extend(["", "CRITICAL WARNINGS:"])
         lines.extend(f"! {warning}" for warning in briefing.critical_warnings)
+
+    if briefing.chief_plan:
+        lines.extend(["", "Chief of Staff plan:"])
+        lines.extend(f"- Objective: {item}" for item in briefing.chief_plan.objectives)
+        if briefing.chief_plan.recommended_actions:
+            lines.append(
+                "- Recommended actions: "
+                + "; ".join(briefing.chief_plan.recommended_actions)
+            )
+        if briefing.chief_plan.latest_assessment:
+            lines.append(f"- Assessment: {briefing.chief_plan.latest_assessment}")
 
     lines.extend(["", "Problems on the table:"])
     for index, problem in enumerate(briefing.problems, start=1):
@@ -351,6 +377,12 @@ def render_aftermath_report(report: TurnAftermathReport) -> str:
     if report.scheduled_actions:
         lines.extend(["", "Scheduled:"])
         lines.extend(f"- {item}" for item in report.scheduled_actions)
+    if report.action_results:
+        lines.extend(["", "Decision impact:"])
+        lines.extend(f"- {item}" for item in report.action_results)
+    if report.chief_updates:
+        lines.extend(["", "Chief of Staff:"])
+        lines.extend(f"- {item}" for item in report.chief_updates)
     if report.rejected_actions:
         lines.extend(["", "Rejected:"])
         lines.extend(f"- {item}" for item in report.rejected_actions)
@@ -449,6 +481,36 @@ def render_advisor_council(
         if advisor.recent_embarrassments:
             lines.append(f"  Concern: {advisor.recent_embarrassments[-1]}")
     return "\n".join(lines)
+
+
+def _chief_plan_brief(
+    world_state: WorldStateV2,
+    action_catalog: list[ActionDefinition],
+    capabilities: list[ScenarioCapability] | None,
+) -> ChiefPlanBrief | None:
+    plan = world_state.chief_plan
+    if plan is None:
+        return None
+    resolver = ActionResolver(action_catalog, capabilities)
+    definitions = (
+        resolver.resolved_capability_definitions()
+        if capabilities
+        else action_catalog
+    )
+    titles = {
+        definition.capability_id or definition.action_id: definition.title
+        for definition in definitions
+    }
+    return ChiefPlanBrief(
+        plan_id=plan.plan_id,
+        objectives=list(plan.objectives),
+        rationale=plan.rationale,
+        recommended_actions=[
+            titles.get(capability_id, capability_id.replace("_", " ").title())
+            for capability_id in plan.recommended_capability_ids
+        ],
+        latest_assessment=plan.latest_assessment,
+    )
 
 
 def _append_action_card_lines(lines: list[str], card: ActionCard) -> None:
@@ -940,23 +1002,6 @@ def _build_consequences(
                 visible_metric_changes=metric_changes[:VISIBLE_CONSEQUENCE_METRIC_LIMIT],
             )
         )
-    for package in deterministic_result.accepted_actions:
-        if package.actor_id != player_entity_id:
-            continue
-        definition = _resolve_definition(resolver, package)
-        title = definition.title if definition is not None else package.mechanical_id
-        consequences.append(
-            VisibleConsequence(
-                title=title,
-                summary=f"{package.intent_summary} [{_driver_read(package)}]",
-                severity=_severity(
-                    definition.escalation_risk
-                    if definition is not None
-                    else DEFAULT_VISIBLE_CONSEQUENCE_RISK
-                ),
-                source_package_id=package.package_id,
-            )
-        )
     if scenario_event_result is not None:
         for record in scenario_event_result.fired_events:
             consequences.append(
@@ -970,14 +1015,84 @@ def _build_consequences(
     return consequences
 
 
-def _driver_read(package: ActionPackage) -> str:
-    if package.channel in {SignalChannel.PUBLIC, SignalChannel.MEDIA}:
-        return "visible source; high confidence"
-    if package.channel in {SignalChannel.INTEL, SignalChannel.MILITARY}:
-        return "operational source; medium confidence"
-    if package.channel == SignalChannel.BACKCHANNEL:
-        return "private source; low confidence"
-    return "private source; medium confidence"
+def _action_result_lines(
+    deterministic_result: DeterministicTurnResult,
+    resolver: ActionResolver,
+    player_entity_id: str,
+) -> list[str]:
+    packages = {
+        package.package_id: package
+        for package in deterministic_result.accepted_actions
+        if package.actor_id == player_entity_id
+    }
+    effects: dict[str, list[str]] = {package_id: [] for package_id in packages}
+    for entry in deterministic_result.causal_trace:
+        package_id = entry.action_package_id
+        if package_id not in effects or entry.phase not in {"resources", "effects"}:
+            continue
+        line = _causal_effect_line(entry.details, player_entity_id)
+        if line and line not in effects[package_id]:
+            effects[package_id].append(line)
+
+    lines: list[str] = []
+    for package_id, package in packages.items():
+        definition = _resolve_definition(resolver, package)
+        title = definition.title if definition is not None else package.mechanical_id
+        details = effects[package_id]
+        if not details:
+            lines.append(f"{title}: resolved with no immediate measurable change.")
+            continue
+        lines.extend(f"{title}: {detail}" for detail in details)
+    return lines
+
+
+def _causal_effect_line(
+    details: dict[str, str | int | float | bool],
+    player_entity_id: str,
+) -> str:
+    key = details.get("key", details.get("resource"))
+    before = details.get("before")
+    after = details.get("after")
+    delta = details.get("delta")
+    if not isinstance(key, str) or not all(
+        isinstance(value, int | float) and not isinstance(value, bool)
+        for value in [before, after, delta]
+    ):
+        return ""
+    if abs(float(delta)) < 0.001:
+        return ""
+    scope = str(details.get("scope", "resource"))
+    label = _effect_label(key)
+    entity_id = details.get("entity_id")
+    if isinstance(entity_id, str) and entity_id != player_entity_id:
+        label = f"{entity_id.replace('_', ' ').title()} {label.lower()}"
+    if scope == "resource":
+        return f"{label} {int(before)} → {int(after)} ({int(delta):+d})."
+    inferred = " (inferred)" if scope in {"truth", "clock", "relationship"} else ""
+    return (
+        f"{label} {float(before):.0%} → {float(after):.0%} "
+        f"({float(delta) * 100:+.0f} pts){inferred}."
+    )
+
+
+def _effect_label(key: str) -> str:
+    leaf = key.rsplit(".", 1)[-1]
+    return {
+        "political_capital": "Political capital",
+        "military_readiness": "Military readiness",
+        "alliance_credit": "Alliance credit",
+        "intelligence_focus": "Intelligence focus",
+        "diplomatic_flexibility": "Diplomatic flexibility",
+        "air_defense_control": "Air-defense control",
+        "public_alarm": "Public alarm",
+        "market_anxiety": "Market anxiety",
+        "allied_confidence": "Allied confidence",
+        "nuclear_escalation": "Nuclear escalation risk",
+        "backchannel_viability": "Backchannel viability",
+        "command_and_control_risk": "Command-control risk",
+        "quarantine_incident_risk": "Quarantine incident risk",
+        "trust": "Relationship trust",
+    }.get(leaf, leaf.replace("_", " ").title())
 
 
 def _player_batch_warnings(
@@ -1398,16 +1513,6 @@ def _favorite_channel(trust_channels: dict[str, float]) -> str:
         return "uncertain channels"
     channel, _ = max(trust_channels.items(), key=lambda item: item[1])
     return channel.replace("_", " ")
-
-
-def _severity(risk: float) -> str:
-    if risk >= HIGH_SEVERITY_THRESHOLD:
-        return "severe"
-    if risk >= MODERATE_SEVERITY_THRESHOLD:
-        return "major"
-    if risk >= LOW_SEVERITY_THRESHOLD:
-        return "moderate"
-    return "minor"
 
 
 def _event_severity(urgency: str) -> str:

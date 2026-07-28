@@ -273,8 +273,9 @@ def test_gui_advisor_json_failure_gets_retry_text_without_advancing() -> None:
         session.ask_advisors("How do we keep an off-ramp open?")
 
     assert str(exc_info.value) == ADVISOR_RETRY_TEXT
-    assert len(llm.calls) == 2
-    assert "Retry instruction" in llm.calls[1].messages[-1].content
+    dialogue_calls = [call for call in llm.calls if call.label.startswith("dialogue.")]
+    assert len(dialogue_calls) == 2
+    assert "Retry instruction" in dialogue_calls[1].messages[-1].content
     assert session.world.turn_number == 1
 
 
@@ -380,10 +381,33 @@ def test_after_action_report_summarizes_player_consequences_before_debug() -> No
     assert "Media desk:" in rendered
     assert "Reconnaissance Confusion" in rendered
     assert "Observed shifts this turn:" in rendered
-    assert "Possible drivers:" in rendered
+    assert "Decision impact:" in rendered
+    assert "Backchannel viability" in rendered
     assert "Immediate consequences:" not in rendered
     assert "ORCHESTRATED TURN DEBUG" not in rendered
     assert "Council reaction:" in rendered
+
+
+def test_full_scripted_turn_replays_from_same_campaign_seed() -> None:
+    def play_once():
+        scenario = build_cuban_missile_crisis_1962_scenario()
+        result = TurnOrchestrator(
+            action_catalog=scenario.action_catalog,
+            capabilities=scenario.capabilities,
+            scenario_events=scenario.scenario_events,
+            scenario_endings=scenario.scenario_endings,
+            pressure_rules=scenario.pressure_rules,
+            hidden_obligations=scenario.hidden_obligations,
+            event_settings=scenario.event_settings,
+            llm_client=ScriptedLLMClient(),
+        ).run_turn(
+            scenario.create_initial_world(rng_seed=73),
+            player_entity_id=scenario.player_entity_id,
+            player_intent="open a private Kremlin backchannel for reciprocal restraint",
+        )
+        return result.world_state.model_dump(mode="json")
+
+    assert play_once() == play_once()
 
 
 def test_after_action_report_summarizes_invalid_npc_actions_without_debug_noise() -> None:

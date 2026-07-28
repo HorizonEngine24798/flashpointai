@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -149,6 +149,16 @@ class AdvisorCouncilResponse(LLMContractModel):
     information_gaps: list[str] = Field(default_factory=list)
     visible_context_limits: list[str] = Field(default_factory=list)
     proposed_advisor_deltas: list[AdvisorDeltaProposal] = Field(default_factory=list)
+
+
+class ChiefPlanResponse(LLMContractModel):
+    assessment: Literal["initial", "continue", "revise", "completed"]
+    assessment_summary: str = Field(min_length=1, max_length=500)
+    objectives: list[str] = Field(min_length=1, max_length=3)
+    rationale: str = Field(min_length=1, max_length=500)
+    recommended_capability_ids: list[str] = Field(default_factory=list, max_length=3)
+    reward_resource: str = Field(default="", max_length=80)
+    reward_reason: str = Field(default="", max_length=300)
 
 
 class BackchannelCounterpartResponse(LLMContractModel):

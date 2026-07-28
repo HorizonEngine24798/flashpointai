@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime, timezone
 from typing import Protocol
 
 from pydantic import BaseModel, Field
@@ -336,6 +337,9 @@ class PrototypeInfoChannel:
     ) -> SignalDelivery:
 
         return SignalDelivery(
+            delivery_id=(
+                f"delivery_{world_state.turn_number}_{signal.signal_id}_{recipient_id}"
+            ),
             signal_id=signal.signal_id,
             recipient_entity_id=recipient_id,
             source_entity_id=signal.source_entity_id,
@@ -461,6 +465,7 @@ class PrototypeInfoChannel:
                 "rumor": signal.payload_type == PayloadType.RUMOR,
                 "leaked": bool(signal.metadata.get("leaked_from_signal_id")),
             },
+            created_at=_deterministic_time(world_state.turn_number),
         )
         world_state.public_timeline.append(entry)
         return entry
@@ -508,6 +513,7 @@ class PrototypeInfoChannel:
                 "truth_reference_id": signal.truth_reference_id or "",
                 **metadata,
             },
+            created_at=_deterministic_time(world_state.turn_number),
         )
         world_state.omniscient_timeline.append(entry)
         result.omniscient_timeline_entry_ids.append(entry.entry_id)
@@ -526,6 +532,10 @@ class PrototypeInfoChannel:
         )
         digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
         return int(digest[:12], 16) / float(0xFFFFFFFFFFFF)
+
+
+def _deterministic_time(turn_number: int) -> datetime:
+    return datetime.fromtimestamp(turn_number, tz=timezone.utc)
 
 
 def _public_title(signal: Signal) -> str:

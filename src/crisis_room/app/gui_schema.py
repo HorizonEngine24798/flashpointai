@@ -154,6 +154,8 @@ class TurnResultView(BaseModel):
     rejected_actions: list[str] = Field(default_factory=list)
     resource_blocked_actions: list[str] = Field(default_factory=list)
     scheduled_actions: list[str] = Field(default_factory=list)
+    action_results: list[str] = Field(default_factory=list)
+    chief_updates: list[str] = Field(default_factory=list)
     critical_warnings: list[str] = Field(default_factory=list)
     batch_warnings: list[str] = Field(default_factory=list)
     flash_events: list[str] = Field(default_factory=list)
@@ -306,12 +308,21 @@ class AgendaConflictView(BaseModel):
     related_item_ids: list[str] = Field(default_factory=list)
 
 
+class ChiefPlanView(BaseModel):
+    plan_id: str
+    objectives: list[str] = Field(default_factory=list)
+    rationale: str = ""
+    recommended_actions: list[str] = Field(default_factory=list)
+    latest_assessment: str = ""
+
+
 class ControlRoomView(BaseModel):
     situation_summary: str = ""
     open_problems: list[ProblemView] = Field(default_factory=list)
     recent_results: list[str] = Field(default_factory=list)
     latest_result: TurnResultView | None = None
     critical_warnings: list[str] = Field(default_factory=list)
+    chief_plan: ChiefPlanView | None = None
     pressure: list[PressureView] = Field(default_factory=list)
     resources: list[ResourceView] = Field(default_factory=list)
     agenda: AgendaView

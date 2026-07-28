@@ -42,6 +42,19 @@ def schema_contract_guidance(
             "If advisor_council.hidden_pressure_bands is present, only advisors marked "
             "hidden_metric_access may cite those bands, and only qualitatively."
         )
+    if response_schema_name == "ChiefPlanResponse":
+        return (
+            "ChiefPlanResponse contract: act as the loyal Chief of Staff. assessment must "
+            "be one of initial, continue, revise, or completed. Assess the previous plan "
+            "against visible developments, then give one to three concise objectives for "
+            "the plan now in force. recommended_capability_ids must be copied exactly from "
+            "the legal_capability_ids supplied in extra and must not exceed action_budget. "
+            "The player may ignore the plan without punishment. Only use completed after "
+            "meaningful evidence that the previous plan succeeded. A completed assessment "
+            "may nominate one reward_resource from allowed_reward_resources; otherwise leave "
+            "reward_resource and reward_reason empty. The engine decides whether any reward "
+            "is actually granted. Do not invent actions, resources, facts, or outcomes."
+        )
     guidance = {
         "BackchannelCounterpartResponse": (
             "BackchannelCounterpartResponse contract: respond as the target entity to "
@@ -131,6 +144,21 @@ ADVISOR_TASK = (
     "answer. Do not imply access to hidden clocks, truth metrics, or private rival state "
     "unless that information appears in the visible context. If hidden_pressure_bands "
     "appears, keep it banded and attribute it only to hidden-access advisors."
+)
+
+
+CHIEF_SYSTEM = (
+    "You are the President's loyal Chief of Staff. Maintain a practical strategic plan "
+    "across turns, test it against new evidence, and make success legible. You advise; "
+    "you do not punish the President for choosing another course."
+)
+CHIEF_TASK = (
+    "Review the prior Chief of Staff plan in extra.previous_plan and the just-resolved "
+    "player actions in extra.last_player_actions. Decide whether the plan should continue, "
+    "be revised, or has been meaningfully completed. On campaign initialization use initial. "
+    "Return the objectives now in force and recommend only currently legal capability ids. "
+    "If a prior plan was genuinely completed, you may nominate one allowed existing resource "
+    "as a one-point recognition award and explain why; otherwise nominate no reward."
 )
 
 

@@ -43,6 +43,7 @@ class TinyResponse(BaseModel):
 
 def test_settings_load_env_and_normalize_base_url(monkeypatch) -> None:
     monkeypatch.setenv("CRISIS_ROOM_LLAMACPP_BASE_URL", "http://127.0.0.1:9090")
+    monkeypatch.setenv("CRISIS_ROOM_LLAMACPP_API_KEY", "test-key")
     monkeypatch.setenv("CRISIS_ROOM_LLAMACPP_MAX_NEW_TOKENS", "256")
     monkeypatch.setenv("CRISIS_ROOM_LLAMACPP_MANAGE_SERVER", "false")
     monkeypatch.setenv("CRISIS_ROOM_LLAMACPP_TEMPERATURE", "0.35")
@@ -51,6 +52,7 @@ def test_settings_load_env_and_normalize_base_url(monkeypatch) -> None:
     settings = load_settings().llama_cpp
 
     assert settings.base_url == "http://127.0.0.1:9090/v1"
+    assert settings.api_key == "test-key"
     assert settings.max_new_tokens == 256
     assert not settings.manage_server
     assert settings.temperature == 0.35
@@ -206,6 +208,16 @@ def test_smoke_request_uses_json_object_payload() -> None:
     assert payload["top_p"] == 0.9
     assert payload["max_tokens"] == 128
     assert "json_schema" not in payload
+
+
+def test_client_uses_configured_api_key() -> None:
+    client = LlamaCppServerClient(
+        LlamaCppSettings(api_key="lm-studio-key", manage_server=False)
+    )
+    try:
+        assert client._http_client.headers["Authorization"] == "Bearer lm-studio-key"
+    finally:
+        client.close()
 
 
 def test_smoke_success_line_includes_model_and_endpoint() -> None:
@@ -369,6 +381,65 @@ def test_llama_cpp_client_validates_json_with_mock_transport() -> None:
     assert response.answer == "hello"
     assert client.calls[0].parsed_response == {"ok": True, "answer": "hello"}
     client.close()
+
+
+def test_campaign_seed_derives_stable_request_seed() -> None:
+    client = LlamaCppServerClient(
+        LlamaCppSettings(manage_server=False),
+        campaign_seed=73,
+    )
+    try:
+        first = client.build_payload(_tiny_request("seeded"), TinyResponse)
+        replay = client.build_payload(_tiny_request("seeded"), TinyResponse)
+        different = client.build_payload(_tiny_request("different"), TinyResponse)
+    finally:
+        client.close()
+    other_campaign = LlamaCppServerClient(
+        LlamaCppSettings(manage_server=False),
+        campaign_seed=74,
+    )
+    try:
+        other_seed = other_campaign.build_payload(_tiny_request("seeded"), TinyResponse)
+    finally:
+        other_campaign.close()
+
+    assert first["seed"] == replay["seed"]
+    assert first["seed"] != different["seed"]
+    assert first["seed"] != other_seed["seed"]
+    assert "cache_prompt" not in first
+
+
+def test_validated_response_cache_replays_without_http_call(tmp_path: Path) -> None:
+    request_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": '{"ok":true,"answer":"cached"}'}}
+                ]
+            },
+        )
+
+    settings = LlamaCppSettings(manage_server=False)
+    cache_dir = tmp_path / "responses"
+    for _ in range(2):
+        client = LlamaCppServerClient(
+            settings,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+            campaign_seed=73,
+            response_cache_dir=cache_dir,
+        )
+        response = client.complete_json(_tiny_request("cached"), TinyResponse)
+        assert response.answer == "cached"
+        client.close()
+
+    assert request_count == 1
+    assert len(list(cache_dir.glob("*.json"))) == 1
+    assert client.calls[0].raw_response == {"response_cache_hit": True}
 
 
 def test_llama_cpp_client_transport_error_includes_label_for_http_status() -> None:

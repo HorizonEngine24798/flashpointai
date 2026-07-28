@@ -368,6 +368,16 @@ class DeterministicEngineV2:
             action_package,
             definition,
         )
+        self._trace_action_effects(
+            result,
+            world_state,
+            action_package,
+            resource_entries=resource_entries,
+            truth_changes=truth_changes,
+            public_changes=public_changes,
+            clock_changes=clock_changes,
+            relationship_changes=relationship_changes,
+        )
 
         signal = self._action_signal(world_state, action_package, definition)
         result.emitted_signals.append(signal)
@@ -429,8 +439,54 @@ class DeterministicEngineV2:
                 resource=entry.resource,
                 before=entry.before,
                 after=entry.after,
-                delta=entry.delta,
+                delta=entry.after - entry.before,
             )
+
+    def _trace_action_effects(
+        self,
+        result: DeterministicTurnResult,
+        world_state: WorldStateV2,
+        action_package: ActionPackage,
+        *,
+        resource_entries: list[ResourceLedgerEntry],
+        truth_changes: list[NumericChange],
+        public_changes: list[NumericChange],
+        clock_changes: list[NumericChange],
+        relationship_changes: list[NumericChange],
+    ) -> None:
+        for entry in resource_entries:
+            self._trace(
+                result,
+                world_state,
+                "effects",
+                f"changed resource {entry.entity_id}.{entry.resource}",
+                action_package,
+                scope="resource",
+                key=entry.resource,
+                entity_id=entry.entity_id,
+                before=entry.before,
+                delta=entry.after - entry.before,
+                after=entry.after,
+            )
+        for scope, changes in [
+            ("truth", truth_changes),
+            ("public", public_changes),
+            ("clock", clock_changes),
+            ("relationship", relationship_changes),
+        ]:
+            for change in changes:
+                self._trace(
+                    result,
+                    world_state,
+                    "effects",
+                    f"changed {scope} {change.key}",
+                    action_package,
+                    scope=scope,
+                    key=change.key,
+                    before=change.before,
+                    delta=change.after - change.before,
+                    after=change.after,
+                )
 
     def _apply_relationship_effects(
         self,

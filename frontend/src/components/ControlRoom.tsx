@@ -47,6 +47,8 @@ export function ControlRoom({
             <ResultSection title="Resolved" items={room.latest_result.resolved_actions} />
             <ResultSection title="Accepted" items={room.latest_result.accepted_actions} />
             <ResultSection title="Scheduled" items={room.latest_result.scheduled_actions} />
+            <ResultSection title="Decision impact" items={room.latest_result.action_results} />
+            <ResultSection title="Chief of Staff" items={room.latest_result.chief_updates} />
             <ResultSection title="Blocked by resources" items={room.latest_result.resource_blocked_actions} warning />
             <ResultSection title="Rejected" items={room.latest_result.rejected_actions} warning />
             <ResultSection title="Internal pressure" items={room.latest_result.pressure_updates} />
@@ -82,6 +84,22 @@ export function ControlRoom({
           <aside className="critical-banner" aria-label="Critical warnings">
             <strong>Critical warnings</strong>
             {room.critical_warnings.map((warning) => <p key={warning}>{warning}</p>)}
+          </aside>
+        ) : null}
+
+        {room.chief_plan ? (
+          <aside className="chief-plan" aria-label="Chief of Staff plan">
+            <header>
+              <strong>Chief of Staff plan</strong>
+              <span>Advisory</span>
+            </header>
+            {room.chief_plan.objectives.map((objective) => <p key={objective}>{objective}</p>)}
+            {room.chief_plan.recommended_actions.length ? (
+              <small>Recommended: {room.chief_plan.recommended_actions.join(" · ")}</small>
+            ) : null}
+            {room.chief_plan.latest_assessment ? (
+              <small>{room.chief_plan.latest_assessment}</small>
+            ) : null}
           </aside>
         ) : null}
 

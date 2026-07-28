@@ -1,180 +1,126 @@
-# Crisis Room Simulation
+# The Crisis Room
 
-A local browser-based political-military crisis room simulator. The default
-scenario is the Cuban Missile Crisis, with the player inhabiting U.S. EXCOMM.
+A local-first political-military crisis simulator where incomplete information,
+competing advisers, and an LLM-driven world turn every decision into a risk.
+The playable scenario puts you inside U.S. EXCOMM during the Cuban Missile
+Crisis.
 
-## Start The GUI
+![The Crisis Room start screen](frontend/src/assets/rooms/start_screen.png)
 
-The GUI has two local pieces:
+## What You Can Do
 
-- a Python FastAPI backend that owns the game session and talks to llama.cpp
-- a React/Vite frontend that renders the room-based browser GUI
+- Question a persistent council of advisers with distinct roles and beliefs.
+- Combine formal actions into a plan, preview it, then commit or reconsider.
+- Open scarce backchannels and negotiate away from the public timeline.
+- React to authored and generated events as pressure, credibility, and
+  escalation change.
+- Play in the browser or use the terminal fallback.
+- Save, resume, and inspect deterministic debug state locally.
 
-For day-to-day development, run them in two terminals.
+The game calls an already-running OpenAI-compatible API such as LM Studio or
+llama.cpp. It never starts or stops the model server during normal gameplay.
 
-### 1. Start The Backend
+## Requirements
 
-Open **Terminal 1** in the repo root and run:
+- Python 3.11+
+- Node.js 18+
+- LM Studio, llama.cpp, or another OpenAI-compatible chat API
 
-```bash
-conda activate polmil
+The current prompt and context defaults target Qwen 3.5 35B, but the endpoint,
+API key, context size, and model name are configurable.
+
+## Quick Start
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]"
+npm.cmd ci --prefix frontend
+Copy-Item config/llama_cpp.example.json config/llama_cpp.local.json
+```
+
+Edit `base_url` and `server_model` in `config/llama_cpp.local.json`, start the
+model API, then verify the connection:
+
+```powershell
+python main.py llm-smoke
+```
+
+Build and launch the complete browser app:
+
+```powershell
+npm.cmd run build --prefix frontend
 python main.py
 ```
 
-Expected output includes:
+Open <http://127.0.0.1:8000>.
 
-```text
-Crisis Room API: http://127.0.0.1:8000/api/state
-```
+## Development
 
-Leave this terminal running.
-
-### 3. Start The Frontend
-
-Open **Terminal 2** in the repo root and run:
-
-```bash
-conda activate polmil
-npm run dev --prefix frontend
-```
-
-Expected output includes a local Vite URL, usually:
-
-```text
-http://127.0.0.1:5173
-```
-
-Open that URL in your browser. The GUI opens to `The Crisis Room` start screen.
-Start a new Cuban Missile Crisis scenario to enter the Control Room.
-
-### 4. Stop The GUI
-
-Press `Ctrl+C` in both terminals. If a background backend is still running, find
-and stop it from PowerShell:
+For live frontend reloads, run the backend and frontend in separate terminals:
 
 ```powershell
-Get-Process python
-Stop-Process -Id <PID>
+# Terminal 1
+python main.py
+
+# Terminal 2
+npm.cmd run dev --prefix frontend
 ```
 
-### What The Backend Does
+Open the Vite URL shown in Terminal 2, normally
+<http://127.0.0.1:5173>. API requests are proxied to the backend on port 8000.
 
-- loads `config/llama_cpp.local.json`
-- starts `llama-server.exe` when the first LLM-backed action needs it
-- loads the local HauhauCS Qwen3.5 35B uncensored GGUF model
-- uses `http://127.0.0.1:8080/v1` for game LLM calls
-- exposes the game API at `http://127.0.0.1:8000/api/state`
-
-First LLM use can take a while because the model has to load. Logs are written
-under `output/diagnostics/llama_server/`.
-
-## One-Terminal Built GUI
-
-After building the frontend, the Python backend can serve the browser files by
-itself. This is less convenient for active UI editing, but simpler when you just
-want to play.
-
-From the repo root:
+Run the fast automated checks with:
 
 ```powershell
-cmd /c npm run build --prefix frontend
-C:\Users\User\Miniconda3\Scripts\conda.exe run -n polmil python main.py
+python -m pytest tests -q -p no:cacheprovider
+npm.cmd run build --prefix frontend
 ```
 
-Then open:
+Current baseline: `148 passed, 4 skipped`. The skipped tests are opt-in live
+LLM checks.
 
-```text
-http://127.0.0.1:8000
-```
-
-## Terminal TUI
-
-The terminal interface remains available as a fallback:
+## Terminal Interface
 
 ```powershell
-C:\Users\User\Miniconda3\Scripts\conda.exe run -n polmil python main.py tui
+python main.py tui
 ```
 
-Legacy commands:
-
-```text
-ASK <text>      Ask advisors a question
-<text>          Same as ASK <text>
-PLAN <text>     Preview compiled actions without resolving a turn
-COMMIT          Resolve the last previewed plan
-ACTION <text>   Submit up to 3 formal actions and resolve one turn
-BACKCHANNEL <target> <message>
-                Send one scarce direct message through an open thread
-END             Take no formal action and let the turn resolve
-BRIEFING        Reprint problems, pressure, agenda, and action cards
-STATUS          Same as BRIEFING
-ADVISORS        Show persistent council state
-BACKCHANNELS    Show active backchannel threads
-DEBUG           Toggle raw turn debug output
-DUMP            Toggle full debug dump mode
-PLAYER          Return to player-visible mode
-SAVE            Save the session JSON now
-HELP            Show commands
-QUIT            Save, exit, and close the managed server
-```
-
-Turns can also produce authored flash events. These are scenario-defined
-interruptions with deterministic effects, routed signals, and short-lived
-problems in the next briefing.
-
-Useful first moves:
+Type `HELP` inside the TUI for the command list. Useful first moves include:
 
 ```text
 ASK How do we keep an off-ramp open?
 PLAN announce a quarantine, open a private Kremlin channel, and authorize recon overflights
 COMMIT
-ACTION announce a naval quarantine while keeping a private Kremlin channel open
-ACTION announce a quarantine, open a private Kremlin channel, and authorize recon overflights
-ACTION open a private Kremlin backchannel for reciprocal restraint
 BACKCHANNEL soviet_presidium Would a private non-invasion pledge make withdrawal possible?
-ACTION float a secret Jupiter missile trade through the backchannel
-ACTION offer a non-invasion pledge if the missiles are removed
-ACTION authorize more U-2 reconnaissance overflights
 END
 ```
 
-## Config
+## Configuration
 
-The default local config is:
+`config/llama_cpp.local.json` is ignored by Git so machine-specific paths stay
+local. The full set of defaults lives in
+`src/crisis_room/config/settings.py`; common values can also be overridden with
+the `CRISIS_ROOM_LLAMACPP_*` environment variables shown in `.env.example`.
 
-```text
-config/llama_cpp.local.json
-```
+Runtime diagnostics are written under `output/diagnostics/`, while playable
+saves are written under `saves/`. Both directories are ignored by Git.
 
-It is ignored by git so machine-specific paths stay local. To create it on
-another machine:
-
-```powershell
-Copy-Item config/llama_cpp.example.json config/llama_cpp.local.json
-```
-
-Then edit these two values:
+## Project Map
 
 ```text
-server_executable    absolute path to llama-server.exe
-server_model_path    absolute path to the Qwen GGUF model
+frontend/                 React/Vite browser interface
+src/crisis_room/app/      session and turn orchestration
+src/crisis_room/agents/   adviser, faction, media, and game-master agents
+src/crisis_room/engine/   deterministic action and adjudication mechanics
+src/crisis_room/llm/      llama.cpp client, prompts, and contracts
+src/crisis_room/scenario/ built-in scenario content and validation
+src/crisis_room/state/    world, beliefs, events, saves, and timelines
+src/crisis_room/web/      FastAPI application
+tests/                    deterministic test suite
 ```
 
-Runtime gameplay uses the live local llama.cpp path. Automated tests may still
-use isolated deterministic doubles so the fast suite does not require a loaded
-model.
-
-## Development Baseline
-
-The supported test command for this repo is:
-
-```powershell
-C:\Users\User\Miniconda3\Scripts\conda.exe run -n polmil python -m pytest tests -q -p no:cacheprovider
-```
-
-As of 2026-06-24, the expected result is `77 passed, 4 skipped`.
-
-Keep `config/llama_cpp.local.json` local. It contains machine-specific paths and
-is intentionally ignored by git. Runtime diagnostics, saves, pytest caches, and
-Python bytecode are also generated artifacts and should stay out of source
-control.
+Architecture notes:
+[system overview](architecture_diagram.md),
+[LLM agent flow](LLM_AGENT_FLOW.md), and
+[LLM state impact](llm_state_impact_diagram.md).

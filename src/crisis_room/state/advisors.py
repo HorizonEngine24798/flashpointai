@@ -60,3 +60,25 @@ class AdvisorCouncilUpdate(BaseModel):
     turn_number: int = Field(ge=0)
     deltas: list[AdvisorStateDelta] = Field(default_factory=list)
     summary: list[str] = Field(default_factory=list)
+
+
+class ChiefAward(BaseModel):
+    plan_id: str
+    turn_number: int = Field(ge=0)
+    resource: str
+    before: int
+    after: int
+    reason: str = ""
+
+
+class ChiefPlanState(BaseModel):
+    plan_id: str
+    created_turn: int = Field(ge=0)
+    last_reviewed_turn: int = Field(ge=0)
+    review_count: int = Field(default=1, ge=1)
+    objectives: list[str] = Field(default_factory=list, max_length=3)
+    rationale: str = ""
+    recommended_capability_ids: list[str] = Field(default_factory=list, max_length=3)
+    latest_assessment: str = ""
+    completed_plan_ids: list[str] = Field(default_factory=list)
+    awards: list[ChiefAward] = Field(default_factory=list)

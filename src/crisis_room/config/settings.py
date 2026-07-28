@@ -27,11 +27,13 @@ class LlamaCppSettings(BaseModel):
     backend: str = "llama_cpp_server"
     preset: str = "qwen3.5-35b-uncensored"
     base_url: str = "http://127.0.0.1:8080/v1"
+    api_key: str = ""
     server_model: str = "Qwen3.5-35B-A3B-Q3_K_M"
     max_input_tokens: int = Field(default=40960, ge=1)
     max_new_tokens: int = Field(default=8192, ge=1)
     token_estimation_chars_per_token: float = Field(default=3.0, gt=0.0)
     json_retries: int = Field(default=1, ge=0)
+    # Legacy opt-in used only by `llm-preflight --start`; gameplay never spawns it.
     manage_server: bool = True
     server_executable: str = ""
     server_model_path: str = ""
@@ -46,6 +48,8 @@ class LlamaCppSettings(BaseModel):
     readiness_poll_interval_seconds: float = Field(default=0.4, gt=0.0)
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     top_p: float = Field(default=0.9, ge=0.0, le=1.0)
+    cache_prompt: bool | None = None
+    diagnostics_dir: str = "output/diagnostics/ai_invalid_json"
 
     @field_validator("base_url")
     @classmethod
@@ -112,6 +116,7 @@ def _llama_env_overrides() -> dict[str, Any]:
     prefix = "CRISIS_ROOM_LLAMACPP_"
     field_map = {
         "BASE_URL": "base_url",
+        "API_KEY": "api_key",
         "SERVER_MODEL": "server_model",
         "SERVER_EXECUTABLE": "server_executable",
         "SERVER_MODEL_PATH": "server_model_path",
@@ -123,6 +128,8 @@ def _llama_env_overrides() -> dict[str, Any]:
         "REQUEST_TIMEOUT_SECONDS": "request_timeout_seconds",
         "TEMPERATURE": "temperature",
         "TOP_P": "top_p",
+        "CACHE_PROMPT": "cache_prompt",
+        "DIAGNOSTICS_DIR": "diagnostics_dir",
     }
     overrides: dict[str, Any] = {}
     for env_suffix, field_name in field_map.items():

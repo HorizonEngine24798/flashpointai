@@ -140,6 +140,8 @@ export type TurnResultView = {
   rejected_actions: string[];
   resource_blocked_actions: string[];
   scheduled_actions: string[];
+  action_results: string[];
+  chief_updates: string[];
   critical_warnings: string[];
   batch_warnings: string[];
   flash_events: string[];
@@ -290,12 +292,21 @@ export type AgendaConflictView = {
   related_item_ids: string[];
 };
 
+export type ChiefPlanView = {
+  plan_id: string;
+  objectives: string[];
+  rationale: string;
+  recommended_actions: string[];
+  latest_assessment: string;
+};
+
 export type ControlRoomView = {
   situation_summary: string;
   open_problems: ProblemView[];
   recent_results: string[];
   latest_result: TurnResultView;
   critical_warnings: string[];
+  chief_plan: ChiefPlanView | null;
   pressure: PressureView[];
   resources: ResourceView[];
   agenda: AgendaView;

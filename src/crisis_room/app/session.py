@@ -120,7 +120,10 @@ class GameSession:
         self.hard_action_limit = hard_action_limit
         self.max_turns = max_turns
         self.debug_visible = debug_visible
-        self.llm_client = llm_client or _build_live_llm_client()
+        self.llm_client = llm_client or _build_live_llm_client(
+            campaign_seed=self.world.rng_seed,
+            response_cache_dir=self.output_dir.parent / "llm_response_cache",
+        )
         self.orchestrator = TurnOrchestrator(
             action_catalog=self.scenario.action_catalog,
             capabilities=self.scenario.capabilities,
@@ -132,6 +135,7 @@ class GameSession:
             llm_client=self.llm_client,
             action_budget=action_budget,
             hard_action_limit=hard_action_limit,
+            enable_chief_of_staff=True,
         )
         self.dialogue_engine = DialogueEngineAgent(
             action_catalog=self.scenario.action_catalog,
@@ -152,6 +156,11 @@ class GameSession:
         self.latest_advisor_response: AdvisorCouncilResponse | None = None
         if load_save_path is not None:
             self._load_save_path(Path(load_save_path))
+        self.orchestrator.initialize_chief_plan(
+            self.world,
+            player_entity_id=self.player_id,
+        )
+        self.recorder.update_world_state(self.world)
 
     def close(self) -> None:
         close = getattr(self.llm_client, "close", None)
@@ -629,6 +638,8 @@ class GameSession:
                 f"{self.scenario.scenario_id!r}"
             )
         self.world = record.world_state
+        if isinstance(self.llm_client, LlamaCppServerClient):
+            self.llm_client.campaign_seed = self.world.rng_seed
         self.player_id = record.player_entity_id
         self.plan_preview = restore_pending_plan(record)
         self.plan_preview_rendered = ""
@@ -680,8 +691,16 @@ class GameSession:
         raise ValueError(f"action card not found: {mechanical_id}. Available: {available}")
 
 
-def _build_live_llm_client() -> LlamaCppServerClient:
-    return LlamaCppServerClient(load_settings().llama_cpp)
+def _build_live_llm_client(
+    *,
+    campaign_seed: int,
+    response_cache_dir: Path,
+) -> LlamaCppServerClient:
+    return LlamaCppServerClient(
+        load_settings().llama_cpp,
+        campaign_seed=campaign_seed,
+        response_cache_dir=response_cache_dir,
+    )
 
 
 def _source_title_for_definition(

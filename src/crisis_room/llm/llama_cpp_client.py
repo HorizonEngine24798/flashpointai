@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -23,24 +24,37 @@ from crisis_room.llm.diagnostics import (
 )
 from crisis_room.llm.prompt_fitting import PromptFitResult, fit_messages_to_budget
 from crisis_room.llm.prompts import JSON_RETRY_INSTRUCTION
-from crisis_room.llm.server_lease import ManagedLlamaServerLease
 
 class LlamaCppServerClient:
-    """OpenAI-compatible llama.cpp chat-completions client."""
+    """Client for an already-running OpenAI-compatible chat API."""
 
     def __init__(
         self,
         settings: LlamaCppSettings | None = None,
         *,
-        lease: ManagedLlamaServerLease | None = None,
         http_client: httpx.Client | None = None,
-        diagnostics_dir: str | Path = "output/diagnostics/ai_invalid_json",
+        diagnostics_dir: str | Path | None = None,
+        campaign_seed: int | None = None,
+        response_cache_dir: str | Path | None = None,
     ) -> None:
         self.settings = settings or LlamaCppSettings()
-        self.lease = lease or ManagedLlamaServerLease(self.settings)
-        self._http_client = http_client or httpx.Client(trust_env=False)
+        headers = (
+            {"Authorization": f"Bearer {self.settings.api_key}"}
+            if self.settings.api_key
+            else None
+        )
+        self._http_client = http_client or httpx.Client(
+            headers=headers,
+            trust_env=False,
+        )
         self._owns_http_client = http_client is None
-        self.diagnostics_dir = Path(diagnostics_dir)
+        self.diagnostics_dir = Path(
+            diagnostics_dir or self.settings.diagnostics_dir
+        )
+        self.campaign_seed = campaign_seed
+        self.response_cache_dir = (
+            Path(response_cache_dir) if response_cache_dir is not None else None
+        )
         self.calls: list[LLMCallRecord] = []
 
     def complete_json(
@@ -48,16 +62,24 @@ class LlamaCppServerClient:
         request: LLMRequest,
         response_model: type[ResponseModelT],
     ) -> ResponseModelT:
-        self.lease.ensure_running()
         attempts = self.settings.json_retries + 1
         last_error: Exception | None = None
         last_artifact: Path | None = None
+        first_payload: dict[str, Any] | None = None
 
         for attempt in range(1, attempts + 1):
             attempt_request = _request_for_attempt(request, attempt)
             fit = fit_messages_to_budget(attempt_request.messages, self.settings)
             payload = self.build_payload(attempt_request, response_model, fit)
+            first_payload = first_payload or payload
             record = LLMCallRecord(request=attempt_request, raw_response=None)
+
+            cached = self._cached_response(payload, response_model)
+            if cached is not None:
+                record.raw_response = {"response_cache_hit": True}
+                record.parsed_response = cached.model_dump(mode="json")
+                self.calls.append(record)
+                return cached
 
             try:
                 raw_response = self._post_payload(
@@ -70,6 +92,9 @@ class LlamaCppServerClient:
                 response = response_model.model_validate(parsed)
                 record.parsed_response = response.model_dump(mode="json")
                 self.calls.append(record)
+                self._cache_response(payload, response)
+                if first_payload is not payload:
+                    self._cache_response(first_payload, response)
                 return response
             except (json.JSONDecodeError, LlamaCppJSONError, ValidationError) as exc:
                 last_error = exc
@@ -125,6 +150,15 @@ class LlamaCppServerClient:
             "top_p": self.settings.top_p,
             "response_format": {"type": "json_object"},
         }
+        if self.campaign_seed is not None:
+            payload["seed"] = _derived_seed(
+                self.campaign_seed,
+                request,
+                fit.messages,
+                response_model,
+            )
+            if self.settings.cache_prompt is not None:
+                payload["cache_prompt"] = self.settings.cache_prompt
         if request.response_schema_name:
             payload["response_format"] = {
                 "type": "json_schema",
@@ -136,8 +170,46 @@ class LlamaCppServerClient:
             payload["json_schema"] = schema
         return payload
 
+    def _cached_response(
+        self,
+        payload: dict[str, Any],
+        response_model: type[ResponseModelT],
+    ) -> ResponseModelT | None:
+        path = self._cache_path(payload)
+        if path is None or not path.is_file():
+            return None
+        try:
+            return response_model.model_validate_json(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+    def _cache_response(self, payload: dict[str, Any], response: BaseModel) -> None:
+        path = self._cache_path(payload)
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(response.model_dump_json(indent=2), encoding="utf-8")
+            temporary.replace(path)
+        except OSError:
+            return
+
+    def _cache_path(self, payload: dict[str, Any]) -> Path | None:
+        if self.response_cache_dir is None:
+            return None
+        material = {
+            "backend": self.settings.backend,
+            "base_url": self.settings.base_url,
+            "server_model": self.settings.server_model,
+            "payload": payload,
+        }
+        digest = hashlib.sha256(
+            json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        return self.response_cache_dir / f"{digest}.json"
+
     def close(self) -> None:
-        self.lease.close()
         if self._owns_http_client:
             self._http_client.close()
 
@@ -248,6 +320,24 @@ def _request_for_attempt(request: LLMRequest, attempt: int) -> LLMRequest:
     messages = [message.model_copy() for message in request.messages]
     messages.append(LLMMessage(role=ChatRole.USER, content=JSON_RETRY_INSTRUCTION))
     return request.model_copy(update={"messages": messages})
+
+
+def _derived_seed(
+    campaign_seed: int,
+    request: LLMRequest,
+    messages: list[LLMMessage],
+    response_model: type[BaseModel],
+) -> int:
+    material = {
+        "campaign_seed": campaign_seed,
+        "label": request.label,
+        "messages": [message.model_dump(mode="json") for message in messages],
+        "response_model": response_model.__name__,
+    }
+    digest = hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).digest()
+    return int.from_bytes(digest[:4], "big")
 
 
 def _stringify_content(content: Any) -> str:

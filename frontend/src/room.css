@@ -540,6 +540,39 @@ summary:focus-visible {
   line-height: 1.48;
 }
 
+.chief-plan {
+  display: grid;
+  gap: 5px;
+  padding: 9px 11px;
+  border: 1px solid rgba(104, 151, 162, 0.5);
+  border-radius: 7px;
+  background: rgba(8, 20, 23, 0.76);
+}
+
+.chief-plan header {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: #e7f4ef;
+}
+
+.chief-plan header span,
+.chief-plan small {
+  color: #a8c5c4;
+  font-size: 11px;
+}
+
+.chief-plan p {
+  margin: 0;
+  color: #e4ded0;
+  font-size: 13px;
+  line-height: 1.32;
+}
+
+.chief-plan small {
+  display: block;
+}
+
 .problem-stack {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
